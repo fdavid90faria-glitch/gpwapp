@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GPW Uploader</title>
+    <script type="module" src="/app.js"></script>
+  </head>
+
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">GPW</span>
+        <div>
+          <span class="brand-title">Uploader</span>
+          <span class="brand-tagline">Built by people who were tired of the same pain</span>
+        </div>
+      </div>
+      <div class="topbar__right">
+        <span id="account" class="account hidden">
+          <span id="account-avatar" class="avatar"></span>
+          <span id="account-email" class="account__email"></span>
+          <button id="settings-btn" class="btn btn--ghost btn--sm" type="button">Settings</button>
+          <button id="logout-btn" class="btn btn--ghost btn--sm" type="button">Log out</button>
+        </span>
+        <span id="status" class="status status--pending">connecting…</span>
+      </div>
+    </header>
+
+    <div id="update-bar" class="update-bar hidden">
+      <span id="update-text">A new version is available.</span>
+      <button id="update-btn" class="btn btn--primary btn--sm" type="button">Update &amp; restart</button>
+      <button id="update-dismiss" class="btn btn--ghost btn--sm" type="button">Later</button>
+    </div>
+
+    <main class="container">
+      <!-- LOGIN (Fase 5) -->
+      <section id="login" class="login hidden">
+        <div class="login__box">
+          <h1 class="login__title">Sign in to GPW</h1>
+          <p class="login__sub">Same account you use on ghostproducerworld.com</p>
+          <input id="login-email" class="input" type="email" autocomplete="username" placeholder="Email" />
+          <input id="login-password" class="input" type="password" autocomplete="current-password" placeholder="Password" />
+          <button id="login-btn" class="btn btn--primary btn--block" type="button">Log in</button>
+          <div id="login-error" class="login__error"></div>
+        </div>
+      </section>
+
+      <!-- SETTINGS / DEFAULTS (Fase 5) -->
+      <section id="settings" class="settings hidden">
+        <div class="settings__head">
+          <h2 class="results__title">Producer defaults</h2>
+          <button id="settings-close" class="btn btn--ghost btn--sm" type="button">Done</button>
+        </div>
+        <p class="settings__hint">Filled in once — every track review starts pre-filled with these.</p>
+        <div class="review__grid">
+          <div class="review__col">
+            <div class="field">
+              <label class="field__label">Operating system</label>
+              <select id="def-os" class="input">
+                <option value="">Select OS</option>
+                <option>Windows</option>
+                <option>macOS</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label">DAW</label>
+              <select id="def-daw" class="input">
+                <option value="">Select DAW</option>
+                <option>Ableton Live</option>
+                <option>FL Studio</option>
+                <option>Logic Pro</option>
+                <option>Cubase</option>
+                <option>Studio One</option>
+                <option>Bitwig</option>
+                <option>Pro Tools</option>
+                <option>Reaper</option>
+                <option>Reason</option>
+              </select>
+            </div>
+            <div class="field"><label class="field__label">DAW version</label><input id="def-daw-version" class="input" type="text" placeholder="21.2" /></div>
+          </div>
+          <div class="review__col">
+            <div class="field"><label class="field__label">Plugins</label><input id="def-plugins" class="input" type="text" placeholder="Serum, Diva, FabFilter" /></div>
+            <div class="field"><label class="field__label">Hardware</label><input id="def-hardware" class="input" type="text" placeholder="(optional)" /></div>
+            <div class="field"><label class="field__label">Default price (EUR)</label><input id="def-price" class="input" type="number" min="200" step="10" placeholder="300" /></div>
+            <div class="field">
+              <label class="field__label">Default genre</label>
+              <select id="def-genre" class="input"></select>
+            </div>
+            <div class="field">
+              <label class="checkbox">
+                <input id="def-project-sale" type="checkbox" />
+                <span class="checkbox__text">
+                  <span class="checkbox__title">Project file for sale</span>
+                  <span class="checkbox__hint">Include the project file as an extra purchase option for buyers.</span>
+                </span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <button id="settings-save" class="btn btn--primary" type="button">Save defaults</button>
+      </section>
+
+      <!-- DROPZONE -->
+      <section id="dropzone" class="dropzone hidden">
+        <div class="dropzone__inner">
+          <div class="dropzone__icon">⬇</div>
+          <h1 class="dropzone__title">Drag your export folder here</h1>
+          <p class="dropzone__hint">
+            Drop the folder with your WAVs (Extended / Radio / Mixdowns, stems,
+            cover…). The app identifies the files automatically.
+          </p>
+          <button id="browse-btn" class="btn btn--primary" type="button">Browse for a folder…</button>
+          <p id="dropzone-last" class="dropzone__last hidden">
+            Last: <span id="dropzone-last-folder"></span>
+            <button id="rescan-btn" class="btn btn--ghost btn--sm" type="button">Rescan</button>
+          </p>
+        </div>
+      </section>
+
+      <!-- RESULTS (scan + analysis + conversion) -->
+      <section id="results" class="results hidden">
+        <div class="results__head">
+          <div>
+            <h2 class="results__title">Detected files</h2>
+            <p id="results-path" class="results__path"></p>
+          </div>
+          <button id="reset-btn" class="btn btn--ghost" type="button">
+            Change folder
+          </button>
+        </div>
+
+        <div id="results-summary" class="summary"></div>
+
+        <div id="analysis" class="analysis hidden">
+          <div class="analysis__metrics">
+            <div class="metric">
+              <span class="metric__label">BPM</span>
+              <span id="an-bpm" class="metric__val">—</span>
+            </div>
+            <div class="metric">
+              <span class="metric__label">Key</span>
+              <span id="an-key" class="metric__val">—</span>
+            </div>
+            <div class="metric">
+              <span class="metric__label">Camelot</span>
+              <span id="an-camelot" class="metric__val">—</span>
+            </div>
+          </div>
+          <div id="an-status" class="analysis__status"></div>
+        </div>
+
+        <div id="conversion" class="conversion hidden">
+          <h3 class="conversion__title">MP3 conversion</h3>
+          <ul id="conversion-list" class="conv-list"></ul>
+        </div>
+
+        <div id="results-warnings" class="warnings"></div>
+        <ul id="results-list" class="filelist"></ul>
+
+        <div class="results__foot">
+          <button id="continue-btn" class="btn btn--primary btn--lg" type="button" disabled>
+            Continue upload →
+          </button>
+          <span id="continue-status" class="publish__status"></span>
+        </div>
+        <p class="results__note">
+          We'll upload the files and open the GPW upload page in your browser with
+          everything attached — you just fill in the remaining details there.
+        </p>
+
+        <div id="upload-progress" class="up-progress hidden"></div>
+
+        <div id="continue-result" class="publish-result hidden"></div>
+      </section>
+    </main>
+
+    <!-- ESSENTIA.JS (BPM/Key detection) — reaproveitado do GPW, offline -->
+    <script src="/essentia/essentia-wasm.web.js"></script>
+    <script src="/essentia/essentia.js-core.js"></script>
+    <script src="/essentia/gpw-analyzer.js"></script>
+
+    <footer class="footer">
+      <span id="version" class="footer__version"></span>
+      <span class="footer__sep">·</span>
+      <span>Ghost Producer World</span>
+    </footer>
+  </body>
+</html>

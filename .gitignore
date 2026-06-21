@@ -1,0 +1,33 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Updater signing keys (NUNCA commitar a privada)
+.tauri/
+
+# Nota: o sidecar de conversao agora e o LAME (~1.7MB), que PODE ser commitado
+# (cabe no limite do GitHub) — ao contrario do FFmpeg antigo (217MB).
+
+# Claude Code (arquivos locais/transitorios)
+.claude/
