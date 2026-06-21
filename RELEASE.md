@@ -27,7 +27,7 @@ Edite **`src-tauri/tauri.conf.json`** → `"version"` (ex.: `0.1.0` → `0.2.0`)
 ### 2. Build assinado (PowerShell)
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw .tauri/gpwapp_updater.key
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""   # a chave foi gerada sem senha
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "<a senha que voce definiu ao gerar a chave>"
 npm run tauri build
 ```
 Isso gera, em `src-tauri/target/release/bundle/nsis/`:
@@ -61,7 +61,7 @@ available — Update & restart”**. Ele clica, baixa, instala e reinicia.
 ```powershell
 # 1. bump version em src-tauri/tauri.conf.json
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw .tauri/gpwapp_updater.key
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "<sua senha da chave>"
 npm run tauri build
 node scripts/make-latest-json.mjs "notas"
 # 2. GitHub Release tag vX.Y.Z + upload do setup.exe e do latest.json
