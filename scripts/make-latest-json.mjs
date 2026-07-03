@@ -29,10 +29,14 @@ try {
   process.exit(1);
 }
 
-const sigName = files.find((f) => f.endsWith("-setup.exe.sig"));
-const exeName = files.find((f) => f.endsWith("-setup.exe"));
+// Filtra pela versao atual: a pasta pode conter instaladores de releases
+// anteriores, e um find() sem filtro pegaria o mais antigo (0.1.0 antes de
+// 0.2.0 na ordem do diretorio) -> latest.json apontaria para a versao errada.
+const tag = `_${version}_`;
+const sigName = files.find((f) => f.includes(tag) && f.endsWith("-setup.exe.sig"));
+const exeName = files.find((f) => f.includes(tag) && f.endsWith("-setup.exe"));
 if (!sigName || !exeName) {
-  console.error("Instalador NSIS ou .sig não encontrado. Buildou com a chave de assinatura definida?");
+  console.error(`Instalador NSIS ${version} ou .sig não encontrado em ${nsisDir}.\nBuildou a versão ${version} com a chave de assinatura definida?`);
   process.exit(1);
 }
 
