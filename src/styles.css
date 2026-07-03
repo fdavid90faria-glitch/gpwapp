@@ -454,6 +454,10 @@ body {
   color: var(--error);
   border-color: rgba(255, 93, 93, 0.3);
 }
+.tag--skip {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
 
 /* Buttons ------------------------------------------------------------- */
 .btn {

@@ -83,14 +83,25 @@ async function refresh(refreshToken) {
   return session;
 }
 
-/// Devolve um access_token valido (renova se faltar < 60s para expirar).
-/// Lanca se nao houver sessao ou a renovacao falhar.
+/// Devolve um access_token valido (renova se faltar < 60s para expirar, ou se
+/// nao soubermos quando expira). Lanca se nao houver sessao ou a renovacao
+/// falhar. Chamadas concorrentes compartilham a mesma renovacao — o refresh
+/// token do Supabase e de uso unico, dois refreshes paralelos invalidariam a
+/// sessao.
+let _refreshing = null;
+
 export async function getValidToken() {
   if (!_session?.accessToken) throw new Error("Not logged in.");
   const now = Math.floor(Date.now() / 1000);
-  if (_session.expiresAt && _session.expiresAt - now < 60) {
+  const needsRefresh = !_session.expiresAt || _session.expiresAt - now < 60;
+  if (needsRefresh) {
     if (!_session.refreshToken) throw new Error("Session expired. Log in again.");
-    const fresh = await refresh(_session.refreshToken);
+    if (!_refreshing) {
+      _refreshing = refresh(_session.refreshToken).finally(() => {
+        _refreshing = null;
+      });
+    }
+    const fresh = await _refreshing;
     return fresh.accessToken;
   }
   return _session.accessToken;

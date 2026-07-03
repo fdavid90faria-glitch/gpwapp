@@ -20,7 +20,7 @@ function openExternal(url) {
   const op = window.__TAURI__.opener;
   if (op?.openUrl) return op.openUrl(url);
   if (op?.open) return op.open(url);
-  console.warn("opener plugin unavailable");
+  return Promise.reject(new Error("opener plugin unavailable"));
 }
 
 const LAST_FOLDER_KEY = "gpwUploader.lastFolder";
@@ -38,14 +38,22 @@ const state = {
   upRows: {},
   uploading: false,
   lastFolder: "",
+  // Rascunho ja criado no site (Retry retoma em vez de duplicar) + campos
+  // cujo arquivo ja subiu com sucesso (nao re-envia).
+  draftId: null,
+  uploadedFields: new Set(),
+  cancelRequested: false,
 };
 
-// Masters/instrumentais -> MP3 gerado (so os masters viram MP3).
+// Id da rodada de scan atual. Cada handleDrop incrementa; a analise e a
+// conversao da rodada anterior (async ainda em curso) descartam o resultado
+// se o id mudou — senao os MP3s/BPM de uma pasta antiga entram na track nova.
+let scanRun = 0;
+
+// Masters -> MP3 gerado (so os masters Extended/Radio viram MP3).
 const MP3_MAP = {
   extended_mix: { field: "xf_extended_mp3", out_name: "ExtendedMaster.mp3", label: "Extended Mix (MP3)" },
-  extended_instrumental: { field: "xf_extended_instrumental_mp3", out_name: "InstrumentalMaster.mp3", label: "Extended Instrumental (MP3)" },
   radio_mix: { field: "xf_radio_mp3", out_name: "RadioMaster.mp3", label: "Radio Mix (MP3)" },
-  radio_instrumental: { field: "xf_radio_instrumental_mp3", out_name: "RadioInstrumentalMaster.mp3", label: "Radio Instrumental (MP3)" },
 };
 
 function el(tag, className, text) {
@@ -77,6 +85,7 @@ function cacheEls() {
   els.logoutBtn = id("logout-btn");
   // login
   els.login = id("login");
+  els.loginForm = id("login-form");
   els.loginEmail = id("login-email");
   els.loginPassword = id("login-password");
   els.loginBtn = id("login-btn");
@@ -116,6 +125,7 @@ function cacheEls() {
   els.resultsList = id("results-list");
   els.resetBtn = id("reset-btn");
   els.continueBtn = id("continue-btn");
+  els.cancelBtn = id("cancel-btn");
   els.continueStatus = id("continue-status");
   els.uploadProgress = id("upload-progress");
   els.continueResult = id("continue-result");
@@ -313,7 +323,7 @@ function saveLastFolder(folder) {
 }
 
 // ---- Analysis (Fase 3) -----------------------------------------------------
-async function analyzeMaster(master) {
+async function analyzeMaster(master, run) {
   state.analysis = null;
   els.analysis.classList.remove("hidden");
   els.anBpm.textContent = "—";
@@ -332,6 +342,7 @@ async function analyzeMaster(master) {
     const buf = await invoke("read_file_bytes", { path: master.path });
     const blob = new Blob([buf]);
     const r = await window.GPW_analyzeAudio(blob);
+    if (run !== scanRun) return; // outra pasta foi escaneada entretanto
     state.analysis = r;
     els.anBpm.textContent = r.bpm || "—";
     els.anKey.textContent = r.keyName || "—";
@@ -339,6 +350,7 @@ async function analyzeMaster(master) {
     els.anStatus.textContent = "✅ Detected from the Extended Mix — you can adjust on the site.";
     els.anStatus.className = "analysis__status analysis__status--ok";
   } catch (err) {
+    if (run !== scanRun) return;
     els.anStatus.textContent = "⚠ Could not auto-detect — you can enter BPM & key on the site.";
     els.anStatus.className = "analysis__status analysis__status--error";
     console.error("GPW_analyzeAudio falhou:", err);
@@ -390,7 +402,11 @@ function onConvProgress(p) {
   }
 }
 
-async function convertMasters(scan) {
+function warnLine(msg) {
+  els.resultsWarnings.appendChild(el("div", "warn-line", msg));
+}
+
+async function convertMasters(scan, run) {
   const masters = buildMasters(scan);
   state.converted = [];
   if (!masters.length) {
@@ -406,26 +422,39 @@ async function convertMasters(scan) {
   els.continueStatus.textContent = "Converting MP3s…";
   try {
     const results = await invoke("convert_masters", { masters });
+    if (run !== scanRun) return; // outra pasta foi escaneada entretanto
     state.converted = results;
     for (const r of results) {
       const row = state.convRows[r.field];
       if (row && r.ok) row.status.textContent = `Done · ${formatSize(r.size)}`;
     }
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length) {
+      warnLine(`⚠ MP3 conversion failed for ${failed.map((r) => r.label).join(", ")} — the upload will continue without them.`);
+    }
   } catch (err) {
+    if (run !== scanRun) return;
     console.error("convert_masters falhou:", err);
+    warnLine("⚠ MP3 conversion failed — the upload will continue without MP3s.");
   } finally {
-    els.continueStatus.textContent = "";
-    els.continueBtn.disabled = !scan.has_extended_master;
+    if (run === scanRun) {
+      els.continueStatus.textContent = "";
+      els.continueBtn.disabled = !scan.has_extended_master;
+    }
   }
 }
 
 // ---- Scan (Fase 2) ---------------------------------------------------------
 async function handleDrop(paths) {
   if (!paths || paths.length === 0) return;
+  if (state.uploading) return; // upload em curso: nao troca de track no meio
   const folder = paths[0];
+  const run = ++scanRun; // invalida analise/conversao da rodada anterior
 
   state.scan = null;
   state.analysis = null;
+  state.draftId = null;
+  state.uploadedFields = new Set();
   els.continueBtn.disabled = true;
   els.continueStatus.textContent = "";
   els.continueResult.classList.add("hidden");
@@ -443,33 +472,44 @@ async function handleDrop(paths) {
 
   try {
     const result = await invoke("scan_folder", { folder });
+    if (run !== scanRun) return;
     state.scan = result;
     renderScan(result, els);
-    saveLastFolder(folder);
+    saveLastFolder(result.folder); // pode ser a pasta pai, se um arquivo foi arrastado
 
     // O "Continue" fica desabilitado ate a conversao MP3 terminar
     // (convertMasters libera no fim) — garante que os MP3s entrem no upload.
     const master = result.files.find((f) => f.category === "extended_mix");
-    if (master) analyzeMaster(master);
-    convertMasters(result);
+    if (master) analyzeMaster(master, run);
+    convertMasters(result, run);
   } catch (err) {
+    if (run !== scanRun) return;
     els.resultsSummary.innerHTML = "";
-    els.resultsWarnings.innerHTML = `<div class="warn-line warn-line--error">Scan failed: ${err}</div>`;
+    els.resultsWarnings.innerHTML = "";
+    els.resultsWarnings.appendChild(el("div", "warn-line warn-line--error", `Scan failed: ${err}`));
     console.error("scan_folder falhou:", err);
   }
 }
 
 // ---- Continue: cria rascunho no site e abre upload.html (Fase nova) ---------
 // Monta a lista de arquivos para o multipart (master `file`, cover, xf_*).
+// Um arquivo por campo: se dois arquivos caem no mesmo slot (duas capas, dois
+// WAVs com "mix" no nome), o primeiro na ordem do scan vence — o scanner-ui
+// avisa quais ficaram de fora. Sem isso o multipart ia com o campo duplicado
+// e as barras de progresso (chaveadas por campo) colidiam.
 function buildUploadFiles() {
   const files = [];
+  const seen = new Set();
+  const push = (field, path, filename) => {
+    if (seen.has(field)) return;
+    seen.add(field);
+    files.push({ field, path, filename });
+  };
   for (const f of state.scan.files) {
-    if (f.upload_field) {
-      files.push({ field: f.upload_field, path: f.path, filename: f.filename });
-    }
+    if (f.upload_field) push(f.upload_field, f.path, f.filename);
   }
   for (const c of state.converted) {
-    if (c.ok) files.push({ field: c.field, path: c.path, filename: c.out_name });
+    if (c.ok) push(c.field, c.path, c.out_name);
   }
   return files;
 }
@@ -502,6 +542,21 @@ function onFileProgress(p) {
   r.fill.style.width = p.percent + "%";
   r.pct.textContent = p.percent + "%";
   if (p.percent >= 100) r.row.classList.add("up-row--done");
+}
+
+function showCancel(show) {
+  els.cancelBtn.classList.toggle("hidden", !show);
+  els.cancelBtn.disabled = false;
+  els.cancelBtn.textContent = "Cancel";
+}
+
+// Pede o cancelamento: o loop de arquivos para no proximo, e o Rust aborta o
+// stream do arquivo em transito. O rascunho fica no site — Retry retoma.
+function onCancelUpload() {
+  state.cancelRequested = true;
+  els.cancelBtn.disabled = true;
+  els.cancelBtn.textContent = "Cancelling…";
+  invoke("set_upload_cancelled", { cancelled: true }).catch(() => {});
 }
 
 function continueError(msg) {
@@ -557,10 +612,13 @@ async function onContinue() {
   }
 
   state.uploading = true;
+  state.cancelRequested = false;
+  invoke("set_upload_cancelled", { cancelled: false }).catch(() => {});
   els.continueBtn.disabled = true;
   els.continueResult.classList.add("hidden");
   els.continueStatus.textContent = "Uploading files…";
   renderUploadRows(files);
+  showCancel(true);
 
   // Sobe UM arquivo por requisicao: master + capa criam o rascunho; os demais
   // (xf_*) vao um a um — evita 502 por memoria/timeout em uploads grandes.
@@ -569,43 +627,66 @@ async function onContinue() {
 
   try {
     let token = await getValidToken();
-    const res = await invoke("create_draft", { payload: { token, fields, files: base } });
-    if (!res.ok || !res.id) {
-      els.continueStatus.textContent = "";
-      els.continueBtn.disabled = false;
-      continueError(res.message || "Could not create the draft.");
-      return;
+
+    // Retry depois de falha parcial: reusa o rascunho ja criado em vez de
+    // criar outro (evita rascunhos duplicados no site).
+    let draftId = state.draftId;
+    if (!draftId) {
+      const res = await invoke("create_draft", { payload: { token, fields, files: base } });
+      if (!res.ok || !res.id) {
+        els.continueStatus.textContent = "";
+        els.continueBtn.disabled = false;
+        continueError(res.message || "Could not create the draft.");
+        return;
+      }
+      draftId = res.id;
+      state.draftId = draftId;
+      for (const f of base) state.uploadedFields.add(f.field);
     }
-    const draftId = res.id;
+    // Marca como concluidas as barras do que ja subiu (base ou retry).
+    for (const field of state.uploadedFields) onFileProgress({ field, percent: 100 });
 
     const failed = [];
     for (const f of extras) {
+      if (state.cancelRequested) break;
+      if (state.uploadedFields.has(f.field)) continue; // ja subiu num retry anterior
       els.continueStatus.textContent = `Uploading ${f.filename}…`;
       try {
         token = await getValidToken(); // renova se necessario entre arquivos
         const r = await invoke("add_draft_file", { token, draftId, file: f });
-        if (!r.ok) failed.push(`${f.filename}: ${r.message}`);
+        if (r.ok) state.uploadedFields.add(f.field);
+        else failed.push(`${f.filename}: ${r.message}`);
       } catch (err) {
+        if (state.cancelRequested) break;
         failed.push(`${f.filename}: ${err}`);
       }
+    }
+
+    if (state.cancelRequested) {
+      els.continueStatus.textContent = "";
+      els.continueBtn.disabled = false;
+      continueError("Upload cancelled — Retry resumes from where it stopped.");
+      return;
     }
 
     // Abre a pagina de upload do site com auto-login (token no hash) + draft id.
     token = await getValidToken();
     const hash = `#gpw_at=${encodeURIComponent(token)}&gpw_rt=${encodeURIComponent(currentSession()?.refreshToken || "")}`;
     const url = `${GPW_BASE}/upload.html?edit=${encodeURIComponent(draftId)}${hash}`;
-    try { await openExternal(url); } catch (e) { console.warn("open failed:", e); }
-    renderContinueSuccess({ warnings: failed }, url);
+    let opened = true;
+    try { await openExternal(url); } catch (e) { opened = false; console.warn("open failed:", e); }
+    renderContinueSuccess({ warnings: failed }, url, opened);
   } catch (err) {
     els.continueStatus.textContent = "";
     els.continueBtn.disabled = false;
     continueError(String(err));
   } finally {
     state.uploading = false;
+    showCancel(false);
   }
 }
 
-function renderContinueSuccess(res, url) {
+function renderContinueSuccess(res, url, opened) {
   els.continueStatus.textContent = "";
   // Mantem o botao desabilitado: ja foi enviado, evita criar rascunho duplicado.
   // Para outra track, arraste uma nova pasta. Para reabrir, use o botao abaixo.
@@ -615,10 +696,16 @@ function renderContinueSuccess(res, url) {
   els.continueResult.innerHTML = "";
   els.continueResult.appendChild(el("h3", "publish-result__title", "✅ Files uploaded — finish on the site"));
   els.continueResult.appendChild(
-    el("p", "publish-result__msg", "The upload page opened in your browser with the files already attached. Fill in the remaining details there and submit for review.")
+    el(
+      "p",
+      "publish-result__msg",
+      opened
+        ? "The upload page opened in your browser with the files already attached. Fill in the remaining details there and submit for review."
+        : "We couldn't open your browser automatically — use the button below to open the upload page and finish there."
+    )
   );
-  const open = el("button", "btn btn--ghost btn--sm", "Open upload page again");
-  open.addEventListener("click", () => openExternal(url));
+  const open = el("button", "btn btn--ghost btn--sm", opened ? "Open upload page again" : "Open upload page");
+  open.addEventListener("click", () => openExternal(url).catch((e) => console.warn("open failed:", e)));
   els.continueResult.appendChild(open);
 
   for (const w of res.warnings || []) {
@@ -673,9 +760,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   cacheEls();
   state.lastFolder = localStorage.getItem(LAST_FOLDER_KEY) || "";
 
-  // Auth
-  els.loginBtn.addEventListener("click", onLogin);
-  els.loginPassword.addEventListener("keydown", (e) => { if (e.key === "Enter") onLogin(); });
+  // Auth (form: Enter submete a partir de qualquer campo)
+  els.loginForm.addEventListener("submit", (e) => { e.preventDefault(); onLogin(); });
   els.logoutBtn.addEventListener("click", onLogout);
   // Settings
   els.settingsBtn.addEventListener("click", () => { fillSettings(); show(els.settings); });
@@ -686,6 +772,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   els.rescanBtn.addEventListener("click", () => { if (state.lastFolder) handleDrop([state.lastFolder]); });
   els.browseBtn.addEventListener("click", onBrowse);
   els.continueBtn.addEventListener("click", onContinue);
+  els.cancelBtn.addEventListener("click", onCancelUpload);
 
   // Auto-update
   els.updateBtn.addEventListener("click", doUpdate);

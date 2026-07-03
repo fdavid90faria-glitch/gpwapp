@@ -62,12 +62,15 @@ fn classify_wav(name_lower: &str) -> Classification {
     let master_kw = name_lower.contains("master") || name_lower.contains("mix");
 
     if radio {
+        // Radio Instrumental/Mixdown nao entram no upload (decisao do GPW).
+        // Ainda sao reconhecidos aqui — antes do master_kw — para nao caírem
+        // por engano no slot de Radio Mix master (ambos contem "mix").
         if instrumental && mixdown {
-            Classification { category: "radio_instrumental_mixdown", label: "Radio Instrumental Mixdown", role: "mixdown", upload_field: Some("xf_radio_instrumental_mixdown"), is_master: false }
+            Classification { category: "radio_instrumental_mixdown", label: "Radio Instrumental Mixdown", role: "skip", upload_field: None, is_master: false }
         } else if instrumental {
-            Classification { category: "radio_instrumental", label: "Radio Instrumental", role: "instrumental", upload_field: Some("xf_radio_instrumental"), is_master: false }
+            Classification { category: "radio_instrumental", label: "Radio Instrumental", role: "skip", upload_field: None, is_master: false }
         } else if mixdown {
-            Classification { category: "radio_mixdown", label: "Radio Mixdown", role: "mixdown", upload_field: Some("xf_radio_mixdown"), is_master: false }
+            Classification { category: "radio_mixdown", label: "Radio Mixdown", role: "skip", upload_field: None, is_master: false }
         } else if master_kw {
             Classification { category: "radio_mix", label: "Radio Mix (master)", role: "master", upload_field: Some("xf_radio_mix"), is_master: true }
         } else {
@@ -94,6 +97,15 @@ fn classify_wav(name_lower: &str) -> Classification {
 /// `in_stems_dir` = true se algum diretorio pai contem "stem".
 fn classify(name_lower: &str, ext: &str, in_stems_dir: bool) -> Classification {
     match ext {
+        // WAV dentro de pasta de stems e stem, nunca master ("Lead Mix.wav"
+        // numa pasta Stems/ cairia no slot do Extended Mix sem este guard).
+        "wav" if in_stems_dir => Classification {
+            category: "stems",
+            label: "Stems",
+            role: "support",
+            upload_field: Some("xf_stems"),
+            is_master: false,
+        },
         "wav" => classify_wav(name_lower),
 
         "mp3" => {
@@ -199,12 +211,16 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
 
 /// Comando exposto ao frontend: escaneia uma pasta de exportacao.
 pub fn scan(folder: &str) -> Result<ScanResult, String> {
-    let dir = Path::new(folder);
+    let mut dir = Path::new(folder);
     if !dir.exists() {
         return Err(format!("Folder not found: {}", folder));
     }
+    // Arrastar um arquivo em vez da pasta: escaneia a pasta pai.
     if !dir.is_dir() {
-        return Err(format!("Path is not a folder: {}", folder));
+        dir = dir
+            .parent()
+            .filter(|p| p.is_dir())
+            .ok_or_else(|| format!("Path is not a folder: {}", folder))?;
     }
 
     let mut files = Vec::new();
@@ -223,7 +239,7 @@ pub fn scan(folder: &str) -> Result<ScanResult, String> {
     let has_extended_master = files.iter().any(|f| f.category == "extended_mix");
 
     Ok(ScanResult {
-        folder: folder.to_string(),
+        folder: dir.to_string_lossy().to_string(),
         files,
         undefined_count,
         has_extended_master,
@@ -289,7 +305,24 @@ mod tests {
         // arquivo sem extensao util, mas dentro de pasta "stems"
         let n = "kick".to_string();
         assert_eq!(classify(&n, "", true).category, "stems");
-        // wav dentro de stems ainda e classificado como audio (nome manda)
-        assert_eq!(cat("kick.wav"), "undefined"); // sem keyword -> indefinido
+        // wav fora de pasta stems, sem keyword -> indefinido
+        assert_eq!(cat("kick.wav"), "undefined");
+    }
+
+    #[test]
+    fn wav_dentro_de_pasta_stems_nunca_e_master() {
+        // "Lead Mix.wav" contem "mix" mas esta na pasta de stems: e stem.
+        let c = classify("lead mix.wav", "wav", true);
+        assert_eq!(c.category, "stems");
+        assert!(!c.is_master);
+        assert_eq!(classify("kick.wav", "wav", true).category, "stems");
+    }
+
+    #[test]
+    fn qualquer_mix_nao_radio_vira_extended_master() {
+        // Comportamento por design: keyword "mix" basta. Duplicados
+        // (2+ arquivos no mesmo campo) sao tratados na UI (dedupe + aviso).
+        assert_eq!(cat("Track (Club Mix).wav"), "extended_mix");
+        assert_eq!(cat("Track Remix.wav"), "extended_mix");
     }
 }

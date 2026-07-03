@@ -1,7 +1,7 @@
 // converter.rs (Fase 4) - converte os masters WAV->MP3 via LAME (sidecar).
 //
-// Regra: gera 1 MP3 por master/instrumental presente (Extended Mix, Extended
-// Instrumental, e os Radio equivalentes se houver). O frontend monta a lista
+// Regra: gera 1 MP3 por master presente (Extended Mix e Radio Mix). O
+// frontend monta a lista
 // (MP3_MAP em app.js). Os mixdowns NAO viram MP3. O form do site so tem 2 slots
 // hoje, mas o backend aceita qualquer xf_* (ver CONTRATO_UPLOAD.md).
 //

@@ -17,19 +17,21 @@ pub const APP_BASE_URL: &str = "https://ghostproducerworld.com";
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(uploader::CancelFlag(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        )))
         .invoke_handler(tauri::generate_handler![
             commands::ping,
             commands::scan_folder,
             commands::read_file_bytes,
             commands::convert_masters,
-            commands::upload_track,
             commands::create_draft,
             commands::add_draft_file,
+            commands::set_upload_cancelled,
             commands::fetch_profile,
             commands::save_auth,
             commands::load_auth,

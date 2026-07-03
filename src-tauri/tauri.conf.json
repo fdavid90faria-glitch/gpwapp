@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "GPW Uploader",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.ghostproducerworld.uploader",
   "build": {
     "frontendDist": "../src"
@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' ipc: http://ipc.localhost https://dhtylvgufuqsjuoxfxst.supabase.co; media-src 'self' blob:"
     }
   },
   "bundle": {
@@ -42,7 +42,7 @@
       "endpoints": [
         "https://github.com/fdavid90faria-glitch/gpwapp/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY4NTlERDY1QkU2NTgwNjUKUldSbGdHVytaZDFaK0Q3MlZxWWJEb3F0UFBjVXg0Y3l6WkI5TTArT0wrNElwdSsvM2R5UUdkUm4K"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFMDQ2OUQ2NTkxRDFDMUQKUldRZEhCMVoxbWtFWHFXMU1NMXlZNktLSEpJZDBrazNOWE05N3NzRDBSczBwbWdETVYzSlcvKzcK"
     }
   }
 }

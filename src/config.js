@@ -19,19 +19,6 @@ export const GENRES = [
   "Trance", "Trap / Wave", "UK Garage",
 ];
 
-export const PRODUCTION_TYPES = [
-  { value: "original", label: "Original", hint: "100% your own composition" },
-  { value: "semi", label: "Semi", hint: "Built around a sample" },
-  { value: "hybrid", label: "Hybrid", hint: "Mix of original + sample" },
-];
-
-export const VOCAL_TYPES = [
-  { value: "without", label: "Without vocals", hint: "Instrumental only" },
-  { value: "royalty_free", label: "Royalty-free", hint: "Licensed vocal pack" },
-  { value: "ai", label: "AI vocals", hint: "Generated vocals" },
-  { value: "exclusive", label: "Exclusive", hint: "Paid / commissioned vocal" },
-];
-
 const DEFAULTS_KEY = "gpwUploader.defaults";
 
 const FALLBACK_DEFAULTS = {
@@ -42,8 +29,6 @@ const FALLBACK_DEFAULTS = {
   hardware: "",
   default_price: 300,
   default_genre: "",
-  default_production_type: "original",
-  default_vocal_type: "without",
   default_project_for_sale: false,
 };
 

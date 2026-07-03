@@ -19,6 +19,7 @@ const ROLE_ICON = {
   mp3: "♪",
   support: "◆",
   image: "▦",
+  skip: "–",
   undefined: "⚠",
 };
 
@@ -79,6 +80,25 @@ function renderWarnings(result, container) {
     );
     container.appendChild(w);
   }
+
+  // Dois arquivos no mesmo campo do upload (duas capas, dois WAVs com "mix"
+  // no nome): so o primeiro sera enviado (mesma regra do buildUploadFiles).
+  const firstByField = new Map();
+  for (const f of result.files) {
+    if (!f.upload_field) continue;
+    const first = firstByField.get(f.upload_field);
+    if (!first) {
+      firstByField.set(f.upload_field, f);
+    } else {
+      container.appendChild(
+        el(
+          "div",
+          "warn-line",
+          `⚠ "${f.filename}" maps to the same slot as "${first.filename}" (${first.label}) — only the first will be uploaded. Rename or remove one if that's wrong.`
+        )
+      );
+    }
+  }
 }
 
 function renderList(result, list) {
@@ -100,6 +120,8 @@ function renderList(result, list) {
     const meta = el("div", "file-row__meta");
     if (f.upload_field) {
       meta.appendChild(el("span", "tag tag--field", f.upload_field));
+    } else if (f.role === "skip") {
+      meta.appendChild(el("span", "tag tag--skip", "not uploaded"));
     } else {
       meta.appendChild(el("span", "tag tag--undef", "categorize"));
     }
