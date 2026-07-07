@@ -42,9 +42,12 @@ Cria `src-tauri/target/release/bundle/latest.json`.
 
 ### 4. Crie a Release no GitHub
 - Tag: `v<versão>` (ex.: `v0.2.0`) — **tem de começar com `v`**.
-- Faça upload de **2 arquivos**:
+- Faça upload de **3 arquivos**:
   1. o instalador `...-setup.exe`
   2. o `latest.json`
+  3. uma **cópia** do instalador renomeada para `GPW-Uploader-setup.exe` (nome fixo,
+     sem versão) — é o que o link de download do site aponta:
+     `https://github.com/fdavid90faria-glitch/gpwapp/releases/latest/download/GPW-Uploader-setup.exe`
 - Publique (não marque como *pre-release*).
 
 > O GitHub troca espaços por pontos no nome do arquivo baixável
@@ -57,12 +60,13 @@ available — Update & restart”**. Ele clica, baixa, instala e reinicia.
 
 ---
 
-## Resumo rápido
+## Resumo rápido (um comando)
+Depois de subir a versão em `src-tauri/tauri.conf.json` (e `Cargo.toml`):
 ```powershell
-# 1. bump version em src-tauri/tauri.conf.json
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw .tauri/gpwapp_updater.key
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "<sua senha da chave>"
-npm run tauri build
-node scripts/make-latest-json.mjs "notas"
-# 2. GitHub Release tag vX.Y.Z + upload do setup.exe e do latest.json
+./scripts/publish-release.ps1 "O que mudou nesta versão"
 ```
+O script faz build assinado, gera o `latest.json`, cria a cópia de nome fixo
+`GPW-Uploader-setup.exe` e publica a Release no GitHub com os 3 assets. A aba
+Tools do site e o auto-updater passam a apontar para ela automaticamente.

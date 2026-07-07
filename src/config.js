@@ -10,8 +10,8 @@ export const SUPABASE_ANON_KEY =
 
 // Lista de generos do site (public/upload.html, select #selGenre).
 export const GENRES = [
-  "Ambient", "Bass House", "Big Room", "Breaks", "Chillout",
-  "Dance / Electro Pop", "Deep House", "Drum & Bass", "Dubstep",
+  "Afro House", "Ambient", "Bass House", "Big Room", "Breaks", "Chillout",
+  "Dance", "Deep House", "Drum & Bass", "Dubstep",
   "Electro House", "Future Bass", "Future House", "Hardstyle", "House",
   "Indie Dance", "LoFi", "Mainstage", "Melodic Techno",
   "Minimal / Deep Tech", "Nu Disco", "Phonk", "Progressive House",
