@@ -60,12 +60,13 @@ available — Update & restart”**. Ele clica, baixa, instala e reinicia.
 
 ---
 
-## Resumo rápido
+## Resumo rápido (um comando)
+Depois de subir a versão em `src-tauri/tauri.conf.json` (e `Cargo.toml`):
 ```powershell
-# 1. bump version em src-tauri/tauri.conf.json
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw .tauri/gpwapp_updater.key
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "<sua senha da chave>"
-npm run tauri build
-node scripts/make-latest-json.mjs "notas"
-# 2. GitHub Release tag vX.Y.Z + upload do setup.exe e do latest.json
+./scripts/publish-release.ps1 "O que mudou nesta versão"
 ```
+O script faz build assinado, gera o `latest.json`, cria a cópia de nome fixo
+`GPW-Uploader-setup.exe` e publica a Release no GitHub com os 3 assets. A aba
+Tools do site e o auto-updater passam a apontar para ela automaticamente.
