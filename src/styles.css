@@ -18,6 +18,10 @@
   box-sizing: border-box;
 }
 
+:root {
+  scrollbar-color: var(--border) var(--bg-elevated);
+}
+
 html,
 body {
   margin: 0;
