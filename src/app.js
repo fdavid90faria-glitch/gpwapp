@@ -7,6 +7,7 @@
 // Usa a API global do Tauri (withGlobalTauri: true).
 
 import { renderScan } from "./scanner-ui.js";
+import { runQc } from "./qc.js";
 import { loadDefaults, saveDefaults, GENRES } from "./config.js";
 import { login, loadSession, currentSession, clearSession, getValidToken } from "./supabase.js";
 
@@ -482,6 +483,9 @@ async function handleDrop(paths) {
     const master = result.files.find((f) => f.category === "extended_mix");
     if (master) analyzeMaster(master, run);
     convertMasters(result, run);
+    runQc(result, () => run === scanRun, els.resultsWarnings).catch((e) =>
+      console.error("QC falhou:", e)
+    );
   } catch (err) {
     if (run !== scanRun) return;
     els.resultsSummary.innerHTML = "";
