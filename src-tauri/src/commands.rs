@@ -114,6 +114,15 @@ fn read_wav_head(path: &str, max_secs: u64) -> Option<Vec<u8>> {
     }
 }
 
+/// Metricas de qualidade de um WAV (peak, LUFS, silencio, vocal) para o QC
+/// do padrao GPW. Streaming em thread separada (arquivos grandes).
+#[tauri::command]
+pub async fn qc_analyze(path: String, category: String) -> Result<crate::qc::QcAnalysis, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::qc::analyze(&path, &category))
+        .await
+        .map_err(|e| format!("QC task failed: {}", e))?
+}
+
 /// Converte os masters WAV->MP3 via FFmpeg sidecar (Fase 4). Emite
 /// "convert:progress" por arquivo e devolve os MP3 gerados.
 #[tauri::command]

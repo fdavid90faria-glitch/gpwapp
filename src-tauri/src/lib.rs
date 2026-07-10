@@ -7,6 +7,7 @@
 
 mod commands;
 mod converter;
+mod qc;
 mod scanner;
 mod uploader;
 
@@ -28,6 +29,7 @@ pub fn run() {
             commands::ping,
             commands::scan_folder,
             commands::read_file_bytes,
+            commands::qc_analyze,
             commands::convert_masters,
             commands::create_draft,
             commands::add_draft_file,

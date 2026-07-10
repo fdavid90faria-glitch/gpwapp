@@ -103,9 +103,10 @@ function renderWarnings(result, container) {
 
 function renderList(result, list) {
   list.innerHTML = "";
-  for (const f of result.files) {
+  for (const [i, f] of result.files.entries()) {
     const undef = f.category === "undefined";
     const li = el("li", `file-row${undef ? " file-row--undefined" : ""}`);
+    li.id = `file-row-${i}`; // qc.js anexa o resultado da analise aqui
 
     const icon = el(
       "span",
