@@ -191,16 +191,37 @@ export async function runQc(scan, isCurrent, warningsEl) {
     } catch (e) { /* soma indisponivel — nao bloqueia */ }
   }
   const failed = items.filter((x) => x.verdict && x.verdict.level === "fail").length;
-  const line = document.createElement("div");
+
   if (cross.length || failed) {
-    line.className = "warn-line warn-line--error";
-    line.textContent =
-      `✗ Audio check: ${failed ? `${failed} file(s) out of the GPW standard` : ""}` +
-      (failed && cross.length ? " · " : "") +
-      cross.map((c) => `⚠ ${c}`).join(" · ");
+    // Bloco estruturado: um titulo + cada problema na sua propria linha (antes
+    // era tudo espremido numa linha so, separado por " · ").
+    const block = document.createElement("div");
+    block.className = "warn-line warn-line--error warn-block";
+
+    const head = document.createElement("div");
+    head.className = "warn-block__head";
+    const total = cross.length + (failed ? 1 : 0);
+    head.textContent = `Audio check — ${total} thing${total === 1 ? "" : "s"} to review`;
+    block.appendChild(head);
+
+    const ul = document.createElement("ul");
+    ul.className = "warn-block__list";
+    if (failed) {
+      const li = document.createElement("li");
+      li.textContent = `${failed} file${failed === 1 ? " doesn't" : "s don't"} meet the GPW standard — see the red note on the file${failed === 1 ? "" : "s"} above.`;
+      ul.appendChild(li);
+    }
+    for (const c of cross) {
+      const li = document.createElement("li");
+      li.textContent = c;
+      ul.appendChild(li);
+    }
+    block.appendChild(ul);
+    warningsEl.appendChild(block);
   } else {
+    const line = document.createElement("div");
     line.className = "warn-line warn-line--ok";
-    line.textContent = `✓ Audio check passed — ${items.length} file(s) within the GPW standard`;
+    line.textContent = `✓ Audio check passed — all ${items.length} file${items.length === 1 ? "" : "s"} meet the GPW standard`;
+    warningsEl.appendChild(line);
   }
-  warningsEl.appendChild(line);
 }

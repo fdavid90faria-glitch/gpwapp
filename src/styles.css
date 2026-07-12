@@ -382,6 +382,45 @@ body {
   border-color: rgba(58, 210, 159, 0.3);
 }
 
+/* Bloco de resumo do QC: titulo + um problema por linha (em vez de tudo numa
+   linha so separada por " · "). */
+.warn-block {
+  padding: 10px 14px;
+}
+.warn-block__head {
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+}
+.warn-block__head::before {
+  content: "✗";
+  font-size: 14px;
+}
+.warn-block__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.warn-block__list li {
+  position: relative;
+  padding-left: 20px;
+  line-height: 1.45;
+  color: #f2c7c7;
+}
+.warn-block__list li::before {
+  content: "⚠";
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0.85;
+}
+
 /* Resultado do QC de audio dentro da fileira do arquivo (qc.js) */
 .qc-line {
   font-size: 11.5px;
