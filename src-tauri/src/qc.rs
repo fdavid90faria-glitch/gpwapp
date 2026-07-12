@@ -236,30 +236,37 @@ pub fn analyze(path: &str, category: &str) -> Result<QcAnalysis, String> {
 pub struct StemsSum {
     /// peak da SOMA de todas as stems (dBFS). Passa de 0 dB se a soma clipar.
     pub sample_peak_db: Option<f64>,
+    /// LUFS integrado da SOMA — comparado com o LUFS do mixdown (devem bater a
+    /// +-1 dB; senao o mixdown esta mais alto/baixo que a soma dos stems).
+    pub lufs_integrated: Option<f64>,
     pub duration: f64,
     pub count: usize,
 }
 
-/// Soma N stems amostra-a-amostra e devolve o peak da soma. Rust puro (sem
-/// ffmpeg): abre todos os WAVs e percorre-os em paralelo, somando; nunca
-/// carrega tudo em memoria. Duracoes diferentes somam ate a mais longa (o
-/// resto das curtas conta 0). O QC ja acusa formato errado por ficheiro.
+/// Soma N stems amostra-a-amostra e devolve o peak E o LUFS integrado da soma.
+/// Rust puro (sem ffmpeg): abre todos os WAVs e percorre-os em paralelo,
+/// somando; nunca carrega tudo em memoria. O sinal somado alimenta o ebur128
+/// (Mode::I) em blocos de ~100ms para o LUFS. Duracoes diferentes somam ate a
+/// mais longa. O formato (rate/canais) vem do 1.o stem — o QC ja acusa formato
+/// errado por ficheiro, e as stems devem ser todas iguais.
 pub fn analyze_stems_sum(paths: &[String]) -> Result<StemsSum, String> {
     if paths.is_empty() {
         return Err("no stems".into());
     }
     let mut iters: Vec<Box<dyn Iterator<Item = f32>>> = Vec::new();
-    let mut max_rate = 1u32;
+    let mut rate = 0u32;
+    let mut channels = 0usize;
     let mut max_frames = 0u64;
-    let mut channels = 1usize;
     for p in paths {
         let reader = hound::WavReader::open(p).map_err(|e| format!("open {}: {}", p, e))?;
         let spec = reader.spec();
         if spec.channels == 0 || spec.sample_rate == 0 {
             continue;
         }
-        max_rate = max_rate.max(spec.sample_rate);
-        channels = channels.max(spec.channels as usize);
+        if rate == 0 {
+            rate = spec.sample_rate;
+            channels = spec.channels as usize;
+        }
         max_frames = max_frames.max(reader.duration() as u64);
         if spec.sample_format == hound::SampleFormat::Float {
             iters.push(Box::new(reader.into_samples::<f32>().map(|s| s.unwrap_or(0.0))));
@@ -268,12 +275,17 @@ pub fn analyze_stems_sum(paths: &[String]) -> Result<StemsSum, String> {
             iters.push(Box::new(reader.into_samples::<i32>().map(move |s| s.unwrap_or(0) as f32 * scale)));
         }
     }
-    if iters.is_empty() {
+    if iters.is_empty() || rate == 0 {
         return Err("no readable stems".into());
     }
 
-    // percorre em lockstep: em cada posicao soma uma amostra de cada stem
+    let mut ebur = EbuR128::new(channels as u32, rate, Mode::I).map_err(|e| format!("ebur128: {}", e))?;
+    let hop = (rate as usize / 10).max(1) * channels; // ~100ms (multiplo de canais)
+    let mut buf: Vec<f32> = Vec::with_capacity(hop);
     let mut peak: f32 = 0.0;
+
+    // percorre em lockstep: em cada posicao soma uma amostra (interleaved) de
+    // cada stem; acumula para o LUFS e vai medindo o peak.
     loop {
         let mut sum = 0.0f32;
         let mut any = false;
@@ -290,11 +302,20 @@ pub fn analyze_stems_sum(paths: &[String]) -> Result<StemsSum, String> {
         if a > peak {
             peak = a;
         }
+        buf.push(sum);
+        if buf.len() >= hop {
+            let _ = ebur.add_frames_f32(&buf);
+            buf.clear();
+        }
+    }
+    if !buf.is_empty() {
+        let _ = ebur.add_frames_f32(&buf);
     }
 
     Ok(StemsSum {
         sample_peak_db: db(peak as f64),
-        duration: max_frames as f64 / max_rate as f64,
+        lufs_integrated: ebur.loudness_global().ok().and_then(finite),
+        duration: max_frames as f64 / rate as f64,
         count: iters.len(),
     })
 }
