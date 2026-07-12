@@ -305,7 +305,13 @@ pub async fn add_file(
         .timeout(std::time::Duration::from_secs(60 * 30))
         .build()
         .map_err(|e| format!("Falha ao criar cliente HTTP: {}", e))?;
-    let fkey = file.field.strip_prefix("xf_").unwrap_or(&file.field).to_string();
+    // O master (campo "file") vai para o slot "master" (o commit poe-no em
+    // original_url); os extras usam o proprio fkey sem o prefixo "xf_".
+    let fkey = if file.field == "file" {
+        "master".to_string()
+    } else {
+        file.field.strip_prefix("xf_").unwrap_or(&file.field).to_string()
+    };
 
     let err_result = |status: u16, message: String| {
         Ok(DraftResult { ok: false, status, id: None, message, warnings: vec![] })

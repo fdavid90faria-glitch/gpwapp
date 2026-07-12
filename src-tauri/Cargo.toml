@@ -1,6 +1,6 @@
 [package]
 name = "gpwapp"
-version = "3.6.0"
+version = "3.7.0"
 description = "GPW Uploader - automated track upload for Ghost Producer World"
 authors = ["Fernando"]
 edition = "2021"
