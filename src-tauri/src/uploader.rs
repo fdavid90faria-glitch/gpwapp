@@ -80,9 +80,11 @@ fn mime_for(ext: &str) -> &'static str {
     }
 }
 
-/// Constroi um Part que transmite o arquivo em streaming (sem carregar tudo
+/// Corpo (reqwest::Body) que transmite o arquivo em streaming (sem carregar tudo
 /// em memoria) e emite "upload:file-progress" conforme os bytes sao enviados.
-async fn file_part(app: &AppHandle, uf: &UploadFile) -> Result<reqwest::multipart::Part, String> {
+/// Devolve tambem o tamanho total (para o Content-Length). Partilhado pelo
+/// multipart (create_draft) e pelo PUT direto ao R2 (add_file).
+async fn progress_body(app: &AppHandle, uf: &UploadFile) -> Result<(reqwest::Body, u64), String> {
     let meta = tokio::fs::metadata(&uf.path)
         .await
         .map_err(|e| format!("{}: nao foi possivel ler ({})", uf.filename, e))?;
@@ -120,8 +122,12 @@ async fn file_part(app: &AppHandle, uf: &UploadFile) -> Result<reqwest::multipar
         }
         chunk
     });
-    let body = reqwest::Body::wrap_stream(stream);
+    Ok((reqwest::Body::wrap_stream(stream), total))
+}
 
+/// Constroi um Part multipart que transmite o arquivo em streaming.
+async fn file_part(app: &AppHandle, uf: &UploadFile) -> Result<reqwest::multipart::Part, String> {
+    let (body, total) = progress_body(app, uf).await?;
     let ext = Path::new(&uf.filename)
         .extension()
         .and_then(|e| e.to_str())
@@ -278,9 +284,12 @@ pub async fn create_draft(app: AppHandle, payload: UploadPayload) -> Result<Draf
     }
 }
 
-/// Anexa UM arquivo a um rascunho (/api/app/draft-add-file). Subir um de cada
-/// vez evita 502 por memória/timeout no servidor. Emite progresso por arquivo
-/// e tenta de novo em falha de rede (ate 3x).
+/// Anexa UM arquivo a um rascunho por UPLOAD DIRETO ao R2 (3 passos):
+///   1) /api/app/draft-file-url  -> pede uma URL assinada de PUT (JSON pequeno)
+///   2) PUT do arquivo DIRETO para o R2 (nao passa pelo backend nem pelo proxy
+///      do Cloudflare, que corta uploads > 100MB) — streaming + Content-Length
+///   3) /api/app/draft-file-commit -> confirma e regista em metadata.files
+/// Emite progresso por arquivo e tenta de novo em falha de rede (ate 3x no PUT).
 pub async fn add_file(
     app: AppHandle,
     token: String,
@@ -296,59 +305,128 @@ pub async fn add_file(
         .timeout(std::time::Duration::from_secs(60 * 30))
         .build()
         .map_err(|e| format!("Falha ao criar cliente HTTP: {}", e))?;
-    let url = format!("{}/api/app/draft-add-file", APP_BASE_URL);
     let fkey = file.field.strip_prefix("xf_").unwrap_or(&file.field).to_string();
 
+    let err_result = |status: u16, message: String| {
+        Ok(DraftResult { ok: false, status, id: None, message, warnings: vec![] })
+    };
+
+    // 1) Pede a URL assinada de PUT. Payload minusculo — passa pelo Cloudflare.
+    let url_endpoint = format!("{}/api/app/draft-file-url", APP_BASE_URL);
+    let meta_resp = client
+        .post(&url_endpoint)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "draft_id": draft_id, "fkey": fkey, "filename": file.filename }))
+        .send()
+        .await
+        .map_err(|e| format!("Falha de rede ao preparar o upload: {}", e))?;
+    let meta_status = meta_resp.status();
+    let meta_body: serde_json::Value = meta_resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
+    if !meta_status.is_success() || !meta_body.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
+        let message = meta_body.get("error").and_then(|e| e.as_str()).map(String::from)
+            .unwrap_or_else(|| status_message(meta_status.as_u16()));
+        return err_result(meta_status.as_u16(), message);
+    }
+    let put_url = meta_body.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+    let path = meta_body.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+    if put_url.is_empty() || path.is_empty() {
+        return err_result(500, "Upload URL missing.".into());
+    }
+
+    // 2) PUT do arquivo DIRETO para o R2. Streaming + Content-Length (o R2 exige-o).
+    //    Retry em falha de rede ou 5xx; um 4xx e deterministico (nao repete).
     const MAX_ATTEMPTS: u32 = 3;
     let mut last_err = String::new();
-    let mut resp = None;
+    let mut put_status = 0u16;
+    let mut put_ok = false;
     for attempt in 1..=MAX_ATTEMPTS {
-        // Form novo a cada tentativa (o stream e consumido no envio).
-        let part = match file_part(&app, &file).await {
-            Ok(p) => p,
-            Err(e) => return Err(e),
-        };
-        let form = reqwest::multipart::Form::new()
-            .text("draft_id", draft_id.clone())
-            .text("fkey", fkey.clone())
-            .part("file", part);
-
-        match client.post(&url).bearer_auth(&token).multipart(form).send().await {
+        let (body, total) = progress_body(&app, &file).await?; // stream novo a cada tentativa
+        match client
+            .put(&put_url)
+            .header(reqwest::header::CONTENT_LENGTH, total)
+            .body(body)
+            .send()
+            .await
+        {
             Ok(r) => {
-                resp = Some(r);
-                break;
+                put_status = r.status().as_u16();
+                if r.status().is_success() {
+                    put_ok = true;
+                    break;
+                }
+                last_err = format!("Storage rejected the file (HTTP {}).", put_status);
+                if attempt < MAX_ATTEMPTS && r.status().is_server_error() {
+                    tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+                } else {
+                    break; // 4xx nao adianta repetir
+                }
             }
             Err(e) => {
                 if is_cancelled(&app) {
                     progress(&app, "error", "Upload cancelled.".into());
                     return Err("Upload cancelled.".into());
                 }
-                last_err = format!("Falha de rede: {}", e);
+                last_err = format!("Falha de rede no upload: {}", e);
                 if attempt < MAX_ATTEMPTS {
                     tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
                 }
             }
         }
     }
+    if !put_ok {
+        progress(&app, "error", last_err.clone());
+        return err_result(put_status, if last_err.is_empty() { "Upload failed.".into() } else { last_err });
+    }
 
-    let resp = match resp {
-        Some(r) => r,
-        None => {
-            progress(&app, "error", last_err.clone());
-            return Err(last_err);
-        }
-    };
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
-    if status.is_success() && body.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
-        Ok(DraftResult { ok: true, status: status.as_u16(), id: None, message: fkey, warnings: vec![] })
+    // 3) Confirma no site — regista o ficheiro em metadata.files[fkey].
+    let commit_endpoint = format!("{}/api/app/draft-file-commit", APP_BASE_URL);
+    let commit_resp = client
+        .post(&commit_endpoint)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "draft_id": draft_id, "fkey": fkey, "path": path, "name": file.filename }))
+        .send()
+        .await
+        .map_err(|e| format!("Falha de rede ao confirmar o upload: {}", e))?;
+    let commit_status = commit_resp.status();
+    let commit_body: serde_json::Value = commit_resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
+    if commit_status.is_success() && commit_body.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
+        Ok(DraftResult { ok: true, status: commit_status.as_u16(), id: None, message: fkey, warnings: vec![] })
     } else {
-        let message = body
-            .get("error")
-            .and_then(|e| e.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| status_message(status.as_u16()));
-        Ok(DraftResult { ok: false, status: status.as_u16(), id: None, message, warnings: vec![] })
+        let message = commit_body.get("error").and_then(|e| e.as_str()).map(String::from)
+            .unwrap_or_else(|| status_message(commit_status.as_u16()));
+        err_result(commit_status.as_u16(), message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Integração opcional: confirma que um PUT em STREAMING com Content-Length
+    // (o que o add_file faz) é aceite pelo R2 — o R2 recusa Transfer-Encoding:
+    // chunked com 411. Só corre se R2_TEST_PUT_URL estiver definida (gerar com
+    // scripts _gen-put-url.mjs no repo do site). Sem a env var, passa a saltar.
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn direct_put_stream_has_content_length() {
+        let url = match std::env::var("R2_TEST_PUT_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => return, // sem URL de teste -> skip
+        };
+        let data = vec![0x47u8; 3 * 1024 * 1024]; // 3 MB
+        let total = data.len() as u64;
+        // Stream em chunks de 64KB, como o ReaderStream de um ficheiro real.
+        let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+            data.chunks(64 * 1024).map(|c| Ok(c.to_vec())).collect();
+        let stream = futures_util::stream::iter(chunks).boxed();
+        let body = reqwest::Body::wrap_stream(stream);
+
+        let res = reqwest::Client::new()
+            .put(&url)
+            .header(reqwest::header::CONTENT_LENGTH, total)
+            .body(body)
+            .send()
+            .await
+            .expect("PUT falhou (rede)");
+        assert_eq!(res.status().as_u16(), 200, "R2 recusou o PUT em streaming: {}", res.status());
     }
 }
