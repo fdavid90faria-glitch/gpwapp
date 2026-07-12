@@ -181,6 +181,13 @@ export async function runQc(scan, isCurrent, warningsEl) {
       const sp = sum && sum.sample_peak_db == null ? null : Math.round(sum.sample_peak_db * 10) / 10;
       if (sp != null && sp > -3)
         cross.push(`Summed stems peak ${fmtDb(sp)} dB above the max -3 dB (the ${sum.count} stems together clip)`);
+      // Volume: o mixdown e a SOMA dos stems devem bater (LUFS integrado, +-1 dB).
+      const mixItem = items.find((x) => x.file.category === "extended_mixdown" && x.analysis);
+      if (mixItem && sum && sum.lufs_integrated != null && mixItem.analysis.lufs_integrated != null) {
+        const d = mixItem.analysis.lufs_integrated - sum.lufs_integrated;
+        if (Math.abs(d) > 1)
+          cross.push(`Mixdown is ${Math.abs(d).toFixed(1)} dB ${d > 0 ? "LOUDER" : "QUIETER"} (LUFS) than the summed stems`);
+      }
     } catch (e) { /* soma indisponivel — nao bloqueia */ }
   }
   const failed = items.filter((x) => x.verdict && x.verdict.level === "fail").length;
