@@ -232,6 +232,73 @@ pub fn analyze(path: &str, category: &str) -> Result<QcAnalysis, String> {
     })
 }
 
+#[derive(Serialize, Default)]
+pub struct StemsSum {
+    /// peak da SOMA de todas as stems (dBFS). Passa de 0 dB se a soma clipar.
+    pub sample_peak_db: Option<f64>,
+    pub duration: f64,
+    pub count: usize,
+}
+
+/// Soma N stems amostra-a-amostra e devolve o peak da soma. Rust puro (sem
+/// ffmpeg): abre todos os WAVs e percorre-os em paralelo, somando; nunca
+/// carrega tudo em memoria. Duracoes diferentes somam ate a mais longa (o
+/// resto das curtas conta 0). O QC ja acusa formato errado por ficheiro.
+pub fn analyze_stems_sum(paths: &[String]) -> Result<StemsSum, String> {
+    if paths.is_empty() {
+        return Err("no stems".into());
+    }
+    let mut iters: Vec<Box<dyn Iterator<Item = f32>>> = Vec::new();
+    let mut max_rate = 1u32;
+    let mut max_frames = 0u64;
+    let mut channels = 1usize;
+    for p in paths {
+        let reader = hound::WavReader::open(p).map_err(|e| format!("open {}: {}", p, e))?;
+        let spec = reader.spec();
+        if spec.channels == 0 || spec.sample_rate == 0 {
+            continue;
+        }
+        max_rate = max_rate.max(spec.sample_rate);
+        channels = channels.max(spec.channels as usize);
+        max_frames = max_frames.max(reader.duration() as u64);
+        if spec.sample_format == hound::SampleFormat::Float {
+            iters.push(Box::new(reader.into_samples::<f32>().map(|s| s.unwrap_or(0.0))));
+        } else {
+            let scale = 1.0 / (1i64 << (spec.bits_per_sample - 1)) as f32;
+            iters.push(Box::new(reader.into_samples::<i32>().map(move |s| s.unwrap_or(0) as f32 * scale)));
+        }
+    }
+    if iters.is_empty() {
+        return Err("no readable stems".into());
+    }
+
+    // percorre em lockstep: em cada posicao soma uma amostra de cada stem
+    let mut peak: f32 = 0.0;
+    loop {
+        let mut sum = 0.0f32;
+        let mut any = false;
+        for it in iters.iter_mut() {
+            if let Some(v) = it.next() {
+                sum += v;
+                any = true;
+            }
+        }
+        if !any {
+            break;
+        }
+        let a = sum.abs();
+        if a > peak {
+            peak = a;
+        }
+    }
+
+    Ok(StemsSum {
+        sample_peak_db: db(peak as f64),
+        duration: max_frames as f64 / max_rate as f64,
+        count: iters.len(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +410,19 @@ mod tests {
         let p = dir.join("nao_wav.wav");
         std::fs::write(&p, b"definitely not a wav").unwrap();
         assert!(analyze(p.to_str().unwrap(), "x").is_err());
+    }
+
+    #[test]
+    fn soma_de_stems_clipa() {
+        // Duas stems de -6 dB (amp 0.5) somadas dao ~0 dB (amp 1.0) -> passa de -3.
+        let a = gen("stemA.wav", 220.0, 0.5, 2.0, 0.0, 24);
+        let b = gen("stemB.wav", 220.0, 0.5, 2.0, 0.0, 24);
+        let sum = analyze_stems_sum(&[a.clone(), b.clone()]).unwrap();
+        let peak = sum.sample_peak_db.unwrap();
+        assert!(peak > -3.0, "soma de duas stems -6dB deve passar de -3 dB: {}", peak);
+        assert_eq!(sum.count, 2);
+        // Uma stem sozinha a -6 dB nao passa de -3.
+        let one = analyze_stems_sum(&[a]).unwrap();
+        assert!(one.sample_peak_db.unwrap() < -3.0, "uma stem -6dB nao passa de -3");
     }
 }

@@ -81,11 +81,28 @@ function renderWarnings(result, container) {
     container.appendChild(w);
   }
 
+  // Stems SOLTAS (WAVs numa pasta Stems/, nao um .zip): o site aceita as stems
+  // como UM ficheiro .zip. Aviso claro em vez da mensagem de colisao de slot.
+  // (As stems extraidas de um zip vem com upload_field null e nao contam aqui.)
+  const looseStems = result.files.filter(
+    (f) => f.category === "stems" && f.ext === "wav" && f.upload_field === "xf_stems"
+  );
+  if (looseStems.length) {
+    container.appendChild(
+      el(
+        "div",
+        "warn-line warn-line--error",
+        `⚠ Stems folder must be zipped — the site accepts the stems as a single .zip. Zip your Stems folder (${looseStems.length} WAV${looseStems.length === 1 ? "" : "s"}) and drop the .zip instead.`
+      )
+    );
+  }
+
   // Dois arquivos no mesmo campo do upload (duas capas, dois WAVs com "mix"
-  // no nome): so o primeiro sera enviado (mesma regra do buildUploadFiles).
+  // no nome): so o primeiro sera enviado. As stems soltas ja foram avisadas
+  // acima — nao repetir a colisao de slot por cada stem.
   const firstByField = new Map();
   for (const f of result.files) {
-    if (!f.upload_field) continue;
+    if (!f.upload_field || f.upload_field === "xf_stems") continue;
     const first = firstByField.get(f.upload_field);
     if (!first) {
       firstByField.set(f.upload_field, f);
