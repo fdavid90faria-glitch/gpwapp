@@ -30,6 +30,7 @@ pub fn run() {
             commands::scan_folder,
             commands::read_file_bytes,
             commands::qc_analyze,
+            commands::qc_stems_sum,
             commands::convert_masters,
             commands::create_draft,
             commands::add_draft_file,

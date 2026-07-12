@@ -86,20 +86,36 @@ function validate(role, a) {
   return { level: "ok", reasons: [] };
 }
 
-// Checagens entre arquivos (mesmas do ANALYZER): duracao da familia Extended
-// + stems vs a Extended Master, e volume Radio vs Extended (LUFS +-1 dB).
+// Checagens entre arquivos: (1) duracao das versoes Extended vs a Extended
+// Master; (2) duracao das STEMS comparadas ENTRE SI (uma stem fora do padrao
+// das outras); (3) volume Radio vs Extended (LUFS +-1 dB).
 function collectCrossIssues(items) {
   const issues = [];
   const ref = items.find((x) => x.file.category === "extended_mix" && x.analysis);
+  // (1) Versoes Extended (NAO stems) vs a Extended Master.
   if (ref) {
     for (const x of items) {
       if (x === ref || !x.analysis) continue;
       const c = x.file.category;
-      if (!(c.startsWith("extended") || c === "stems")) continue;
+      if (c === "stems" || !c.startsWith("extended")) continue;
       const diff = Math.abs(x.analysis.duration - ref.analysis.duration);
       if (diff > 1)
         issues.push(
           `"${x.file.filename}": duration ${fmtTime(x.analysis.duration)} differs from the Extended Master (${fmtTime(ref.analysis.duration)})`
+        );
+    }
+  }
+  // (2) Stems entre si: a referencia e a mediana das duracoes das stems; uma
+  // stem que se afaste > 1 s do resto e apontada (uma stem com tamanho
+  // diferente das outras).
+  const stems = items.filter((x) => x.file.category === "stems" && x.analysis);
+  if (stems.length >= 2) {
+    const durs = stems.map((x) => x.analysis.duration).sort((a, b) => a - b);
+    const median = durs[Math.floor(durs.length / 2)];
+    for (const x of stems) {
+      if (Math.abs(x.analysis.duration - median) > 1)
+        issues.push(
+          `"${x.file.filename}" (stem): duration ${fmtTime(x.analysis.duration)} differs from the other stems (${fmtTime(median)})`
         );
     }
   }
@@ -154,6 +170,19 @@ export async function runQc(scan, isCurrent, warningsEl) {
   if (!isCurrent()) return;
 
   const cross = collectCrossIssues(items);
+
+  // Soma das stems: a SOMA de todos os stems nao pode passar de -3 dB de peak
+  // (mesma regra do ANALYZER). Corre em Rust; falha silenciosa se der erro.
+  const stemPaths = items.filter((x) => x.role === "stems" && x.analysis).map((x) => x.file.path);
+  if (stemPaths.length >= 2) {
+    try {
+      const sum = await invoke("qc_stems_sum", { paths: stemPaths });
+      if (!isCurrent()) return;
+      const sp = sum && sum.sample_peak_db == null ? null : Math.round(sum.sample_peak_db * 10) / 10;
+      if (sp != null && sp > -3)
+        cross.push(`Summed stems peak ${fmtDb(sp)} dB above the max -3 dB (the ${sum.count} stems together clip)`);
+    } catch (e) { /* soma indisponivel — nao bloqueia */ }
+  }
   const failed = items.filter((x) => x.verdict && x.verdict.level === "fail").length;
   const line = document.createElement("div");
   if (cross.length || failed) {

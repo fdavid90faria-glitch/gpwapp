@@ -123,6 +123,15 @@ pub async fn qc_analyze(path: String, category: String) -> Result<crate::qc::QcA
         .map_err(|e| format!("QC task failed: {}", e))?
 }
 
+/// Soma o peak de todas as stems (dBFS). Passa de 0 dB se a soma clipar — o QC
+/// usa isto para acusar "stems somados acima de -3 dB". Streaming em thread.
+#[tauri::command]
+pub async fn qc_stems_sum(paths: Vec<String>) -> Result<crate::qc::StemsSum, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::qc::analyze_stems_sum(&paths))
+        .await
+        .map_err(|e| format!("QC sum task failed: {}", e))?
+}
+
 /// Converte os masters WAV->MP3 via FFmpeg sidecar (Fase 4). Emite
 /// "convert:progress" por arquivo e devolve os MP3 gerados.
 #[tauri::command]

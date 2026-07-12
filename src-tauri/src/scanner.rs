@@ -196,9 +196,9 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
 
         out.push(ScannedFile {
-            filename: file_name,
+            filename: file_name.clone(),
             path: path.to_string_lossy().to_string(),
-            ext,
+            ext: ext.clone(),
             size,
             category: c.category.to_string(),
             label: c.label.to_string(),
@@ -206,7 +206,77 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
             upload_field: c.upload_field.map(|s| s.to_string()),
             is_master: c.is_master,
         });
+
+        // Stems num .zip: o zip acima continua a ser o ficheiro enviado
+        // (xf_stems). Extraimos os WAVs a MAIS, so para o QC os analisar (soma,
+        // duracao, stem vazia) — marcados sem upload_field para nao colidirem
+        // com o zip nem serem enviados. Falha na extracao e ignorada (o upload
+        // do zip nao depende disto).
+        if ext == "zip" && (name_lower.contains("stem") || in_stems_dir) {
+            if let Ok(wavs) = extract_wavs_from_zip(&path.to_string_lossy()) {
+                for w in wavs {
+                    let wname = Path::new(&w)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let wsize = fs::metadata(&w).map(|m| m.len()).unwrap_or(0);
+                    out.push(ScannedFile {
+                        filename: wname,
+                        path: w,
+                        ext: "wav".into(),
+                        size: wsize,
+                        category: "stems".into(),
+                        label: "Stem (from zip)".into(),
+                        role: "skip".into(), // QC-only: nao entra no upload
+                        upload_field: None,
+                        is_master: false,
+                    });
+                }
+            }
+        }
     }
+}
+
+/// Extrai os WAVs de um .zip de stems para uma pasta temporaria e devolve os
+/// caminhos. So para QC (o zip original e que sobe no upload). Porta do
+/// GPW ANALYZER (extract_wavs_from_zip), com protecao contra nomes com pasta.
+fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
+    let path = Path::new(zip_path);
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "stems".into());
+    let file = fs::File::open(path).map_err(|e| format!("open zip: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("bad zip: {}", e))?;
+
+    let dest = std::env::temp_dir().join("gpw_uploader_stems").join(&name);
+    let _ = fs::remove_dir_all(&dest);
+    fs::create_dir_all(&dest).map_err(|e| format!("temp dir: {}", e))?;
+
+    let mut out = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let ename = entry.name().to_string();
+        if !ename.to_lowercase().ends_with(".wav") {
+            continue;
+        }
+        let base = ename.rsplit(['/', '\\']).next().unwrap_or(&ename).to_string();
+        let target = dest.join(&base);
+        let mut f = match fs::File::create(&target) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if std::io::copy(&mut entry, &mut f).is_ok() {
+            out.push(target.to_string_lossy().to_string());
+        }
+    }
+    if out.is_empty() {
+        return Err("no WAV in zip".into());
+    }
+    Ok(out)
 }
 
 /// Comando exposto ao frontend: escaneia uma pasta de exportacao.
