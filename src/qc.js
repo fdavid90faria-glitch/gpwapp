@@ -26,13 +26,22 @@ const fmtFormat = (a) =>
 function qcRole(f) {
   if (f.ext !== "wav") return null; // so WAV tem regra de formato/peak
   if (f.category === "stems") return "stems";
-  if (f.category === "extended_mix" || f.category === "radio_mix") return "master";
+  // Masters (versoes masterizadas, peak -0.3..0 dB): Extended Mix, o Extended
+  // Instrumental (Mix) e o Radio Mix. O Extended Instrumental e a versao master
+  // instrumental — NAO um mixdown (esse e o extended_instrumental_mixdown).
+  if (
+    f.category === "extended_mix" ||
+    f.category === "extended_instrumental" ||
+    f.category === "radio_mix"
+  )
+    return "master";
   const n = f.filename.toLowerCase();
   if (n.includes("instrumental") && n.includes("master")) return "master";
+  // Mixdowns (headroom p/ masterizacao, peak <= -3 dB): Extended Mixdown e o
+  // Extended Instrumental Mixdown. Stems ja tratados acima.
   if (
     f.category === "extended_mixdown" ||
-    f.category === "extended_instrumental_mixdown" ||
-    f.category === "extended_instrumental"
+    f.category === "extended_instrumental_mixdown"
   )
     return "mixdown";
   return "silence"; // radio_* (fora do upload) e indefinidos: so acusa vazio
