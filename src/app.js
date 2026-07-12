@@ -624,10 +624,14 @@ async function onContinue() {
   renderUploadRows(files);
   showCancel(true);
 
-  // Sobe UM arquivo por requisicao: master + capa criam o rascunho; os demais
-  // (xf_*) vao um a um — evita 502 por memoria/timeout em uploads grandes.
-  const base = files.filter((f) => f.field === "file" || f.field === "cover");
-  const extras = files.filter((f) => f.field.startsWith("xf_"));
+  // A capa (imagem pequena) cria o rascunho no multipart. O master ("file") e
+  // todos os extras (xf_*) sobem UM a UM, DIRETO ao R2 (add_draft_file), sem
+  // passar pelo backend nem pelo proxy do Cloudflare (que corta > 100MB). O
+  // master vai primeiro por ser o principal.
+  const base = files.filter((f) => f.field === "cover");
+  const extras = files
+    .filter((f) => f.field === "file" || f.field.startsWith("xf_"))
+    .sort((a, b) => (a.field === "file" ? -1 : b.field === "file" ? 1 : 0));
 
   try {
     let token = await getValidToken();
