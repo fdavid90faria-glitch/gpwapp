@@ -11,11 +11,17 @@ const { invoke } = window.__TAURI__.core;
 
 let _session = null; // cache em memoria da sessao atual
 
-function persist(session) {
+// Grava a sessao e SO devolve depois de estar em disco. O Supabase rotaciona o
+// refresh token a cada renovacao (o antigo deixa de servir); se o app fechasse
+// antes desta escrita, ficava em disco um token ja invalido -> deslogava no
+// arranque seguinte. Por isso esperamos pela escrita.
+async function persist(session) {
   _session = session;
-  invoke("save_auth", { data: JSON.stringify(session) }).catch((e) =>
-    console.warn("save_auth failed:", e)
-  );
+  try {
+    await invoke("save_auth", { data: JSON.stringify(session) });
+  } catch (e) {
+    console.warn("save_auth failed:", e);
+  }
 }
 
 /// Sessao atual em memoria (sincrono). Use depois de loadSession()/login().
@@ -70,7 +76,7 @@ async function tokenRequest(grant, body) {
 /// Faz login com email/senha e persiste a sessao.
 export async function login(email, password) {
   const session = await tokenRequest("password", { email, password });
-  persist(session);
+  await persist(session);
   return session;
 }
 
@@ -79,7 +85,7 @@ async function refresh(refreshToken) {
   const session = await tokenRequest("refresh_token", {
     refresh_token: refreshToken,
   });
-  persist(session);
+  await persist(session);
   return session;
 }
 
