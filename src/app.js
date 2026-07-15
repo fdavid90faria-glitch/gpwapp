@@ -84,6 +84,10 @@ function cacheEls() {
   els.accountEmail = id("account-email");
   els.settingsBtn = id("settings-btn");
   els.logoutBtn = id("logout-btn");
+  // guide
+  els.guideBtn = id("guide-btn");
+  els.guide = id("guide");
+  els.guideClose = id("guide-close");
   // login
   els.login = id("login");
   els.loginForm = id("login-form");
@@ -142,10 +146,19 @@ function cacheEls() {
 }
 
 function show(section) {
-  for (const s of [els.login, els.settings, els.dropzone, els.results]) {
+  for (const s of [els.login, els.settings, els.dropzone, els.results, els.guide]) {
     s.classList.add("hidden");
   }
   section.classList.remove("hidden");
+}
+
+// Guia (abre por cima; ao fechar volta à secção onde o utilizador estava).
+let guidePrevSection = null;
+function currentSection() {
+  for (const s of [els.login, els.settings, els.dropzone, els.results]) {
+    if (s && !s.classList.contains("hidden")) return s;
+  }
+  return els.dropzone;
 }
 
 // ---- Healthcheck -----------------------------------------------------------
@@ -774,6 +787,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Settings
   els.settingsBtn.addEventListener("click", () => { fillSettings(); show(els.settings); });
   els.settingsClose.addEventListener("click", () => show(els.dropzone));
+
+  els.guideBtn.addEventListener("click", () => { guidePrevSection = currentSection(); show(els.guide); });
+  els.guideClose.addEventListener("click", () => show(guidePrevSection || els.dropzone));
   els.settingsSave.addEventListener("click", onSettingsSave);
   // Results
   els.resetBtn.addEventListener("click", () => show(els.dropzone));

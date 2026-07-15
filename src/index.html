@@ -18,6 +18,7 @@
         </div>
       </div>
       <div class="topbar__right">
+        <button id="guide-btn" class="btn btn--ghost btn--sm" type="button">Guide</button>
         <span id="account" class="account hidden">
           <span id="account-avatar" class="avatar"></span>
           <span id="account-email" class="account__email"></span>
@@ -175,6 +176,32 @@
         <div id="upload-progress" class="up-progress hidden"></div>
 
         <div id="continue-result" class="publish-result hidden"></div>
+      </section>
+
+      <!-- GUIA: como preparar a pasta (igual à secção do site) -->
+      <section id="guide" class="guide hidden">
+        <div class="guide__head">
+          <h2 class="results__title">How to prepare your folder</h2>
+          <button id="guide-close" class="btn btn--ghost btn--sm" type="button">Done</button>
+        </div>
+        <div class="guide__body">
+          <div class="guide__folder">
+            <div class="gf-row"><span class="gf-ico gf-img">🖼️</span> Cover <span class="gf-opt">(Optional)</span></div>
+            <div class="gf-row"><span class="gf-ico gf-wav">🎵</span> Extended Instrumental Mix.wav</div>
+            <div class="gf-row"><span class="gf-ico gf-wav">🎵</span> Extended Instrumental Mixdown.wav</div>
+            <div class="gf-row"><span class="gf-ico gf-wav">🎵</span> Extended Mix.wav</div>
+            <div class="gf-row"><span class="gf-ico gf-wav">🎵</span> Extended Mixdown.wav</div>
+            <div class="gf-row"><span class="gf-ico gf-wav">🎵</span> Radio Mix.wav <span class="gf-opt">(Optional)</span></div>
+            <div class="gf-row"><span class="gf-ico gf-zip">🗂️</span> Midi</div>
+            <div class="gf-row"><span class="gf-ico gf-zip">🗂️</span> Project</div>
+            <div class="gf-row"><span class="gf-ico gf-zip">🗂️</span> Stems</div>
+          </div>
+          <div class="guide__text">
+            <p>Set up your folder like this, with these files. The <strong>Radio Mix</strong> and the <strong>Cover</strong> are optional on the site.</p>
+            <p>With the folder organized, just <strong class="guide__hl">drag it into the GPW Uploader</strong> — or click <strong>Browse for a folder…</strong> inside the app. From there, the app does the rest of the work for you.</p>
+            <p class="guide__muted">If any file is outside the standard, the app tells you exactly what's wrong. Once everything meets the site's standard, you're cleared to upload — and you'll be taken straight to the upload page on the site, with everything ready.</p>
+          </div>
+        </div>
       </section>
     </main>
 
