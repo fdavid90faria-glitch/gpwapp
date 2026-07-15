@@ -107,6 +107,8 @@ function cacheEls() {
   els.defPrice = id("def-price");
   els.defGenre = id("def-genre");
   els.defProjectSale = id("def-project-sale");
+  els.defCustomize = id("def-customize");
+  els.defCustomizePrice = id("def-customize-price");
   // Popula o dropdown de generos (vazio = sem padrao).
   if (els.defGenre && !els.defGenre.options.length) {
     els.defGenre.appendChild(el("option", null, "No default (pick per track)")).value = "";
@@ -301,6 +303,8 @@ function fillSettings() {
   els.defPrice.value = d.default_price || 300;
   els.defGenre.value = d.default_genre || "";
   els.defProjectSale.checked = !!d.default_project_for_sale;
+  els.defCustomize.checked = !!d.default_customization;
+  els.defCustomizePrice.value = String(d.default_customization_price || 50);
 }
 
 function onSettingsSave() {
@@ -314,6 +318,8 @@ function onSettingsSave() {
     default_price: parseFloat(els.defPrice.value) || 300,
     default_genre: els.defGenre.value,
     default_project_for_sale: els.defProjectSale.checked,
+    default_customization: els.defCustomize.checked,
+    default_customization_price: parseInt(els.defCustomizePrice.value, 10) || 50,
   };
   saveDefaults(state.defaults);
   show(els.dropzone);
@@ -608,6 +614,11 @@ async function onContinue() {
     daw_version: d.daw_version,
     plugins: d.plugins,
     hardware: d.hardware,
+    // Padrao de personalizacao (Settings) → pre-preenche o chkCustomize do site.
+    customization: {
+      enabled: !!d.default_customization,
+      price: parseInt(d.default_customization_price, 10) || 50,
+    },
   };
   // Genero padrao (opcional): pre-seleciona o estilo no site.
   if (d.default_genre) metadata.genres = [d.default_genre];

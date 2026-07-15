@@ -30,6 +30,8 @@ const FALLBACK_DEFAULTS = {
   default_price: 300,
   default_genre: "",
   default_project_for_sale: false,
+  default_customization: false,
+  default_customization_price: 50,
 };
 
 export function loadDefaults() {
