@@ -26,25 +26,30 @@ const fmtFormat = (a) =>
 function qcRole(f) {
   if (f.ext !== "wav") return null; // so WAV tem regra de formato/peak
   if (f.category === "stems") return "stems";
-  // Masters (versoes masterizadas, peak -0.3..0 dB): Extended Mix, o Extended
-  // Instrumental (Mix) e o Radio Mix. O Extended Instrumental e a versao master
-  // instrumental — NAO um mixdown (esse e o extended_instrumental_mixdown).
+  // Masters (versoes masterizadas, peak -0.3..0 dB): Extended Mix, Extended
+  // Instrumental (Mix), Radio Mix e Radio Instrumental (Mix) — mesmo padrao,
+  // Radio espelha Extended. O Instrumental e a versao master instrumental —
+  // NAO um mixdown (esse e o *_instrumental_mixdown).
   if (
     f.category === "extended_mix" ||
     f.category === "extended_instrumental" ||
-    f.category === "radio_mix"
+    f.category === "radio_mix" ||
+    f.category === "radio_instrumental"
   )
     return "master";
   const n = f.filename.toLowerCase();
   if (n.includes("instrumental") && n.includes("master")) return "master";
-  // Mixdowns (headroom p/ masterizacao, peak <= -3 dB): Extended Mixdown e o
-  // Extended Instrumental Mixdown. Stems ja tratados acima.
+  // Mixdowns (headroom p/ masterizacao, peak <= -3 dB): Extended Mixdown,
+  // Extended Instrumental Mixdown, Radio Mixdown e Radio Instrumental Mixdown.
+  // Stems ja tratados acima.
   if (
     f.category === "extended_mixdown" ||
-    f.category === "extended_instrumental_mixdown"
+    f.category === "extended_instrumental_mixdown" ||
+    f.category === "radio_mixdown" ||
+    f.category === "radio_instrumental_mixdown"
   )
     return "mixdown";
-  return "silence"; // radio_* (fora do upload) e indefinidos: so acusa vazio
+  return "silence"; // indefinidos: so acusa vazio
 }
 
 // Padrao GPW (secao 1 da arquitetura do ANALYZER):
@@ -119,7 +124,21 @@ function collectCrossIssues(items) {
         );
     }
   }
+  // (1b) Versoes Radio vs a Radio Master — mesmo padrao do (1), so ativa se
+  // o produtor enviou uma Radio Mix (grupo Radio e sempre opcional).
   const rad = items.find((x) => x.file.category === "radio_mix" && x.analysis);
+  if (rad) {
+    for (const x of items) {
+      if (x === rad || !x.analysis) continue;
+      const c = x.file.category;
+      if (!c.startsWith("radio")) continue;
+      const diff = Math.abs(x.analysis.duration - rad.analysis.duration);
+      if (diff > 1)
+        issues.push(
+          `"${x.file.filename}": duration ${fmtTime(x.analysis.duration)} differs from the Radio Master (${fmtTime(rad.analysis.duration)})`
+        );
+    }
+  }
   if (ref && rad && ref.analysis.lufs_integrated != null && rad.analysis.lufs_integrated != null) {
     const d = rad.analysis.lufs_integrated - ref.analysis.lufs_integrated;
     if (Math.abs(d) > 1)

@@ -12,6 +12,16 @@ const REQUIRED = {
   project: "Project",
 };
 
+// Grupo Radio (secao 3): cada um e opcional isolado, mas no site, se QUALQUER
+// um for enviado, o grupo inteiro passa a obrigatorio. radio_mp3 fica de fora
+// — e gerado pelo app a partir do radio_mix, nunca vem da pasta.
+const RADIO_GROUP = {
+  radio_mix: "Radio Mix",
+  radio_mixdown: "Radio Mixdown",
+  radio_instrumental: "Radio Instrumental Master",
+  radio_instrumental_mixdown: "Radio Instrumental Mixdown",
+};
+
 const ROLE_ICON = {
   master: "★",
   mixdown: "▣",
@@ -79,6 +89,21 @@ function renderWarnings(result, container) {
       "Missing (required by site): " + missing.join(", ")
     );
     container.appendChild(w);
+  }
+
+  // Grupo Radio ativado: avisa o que falta pra completar o grupo (o site
+  // bloqueia o submit se ficar incompleto).
+  const radioMissing = Object.entries(RADIO_GROUP)
+    .filter(([cat]) => !present.has(cat))
+    .map(([, label]) => label);
+  if (radioMissing.length && radioMissing.length < Object.keys(RADIO_GROUP).length) {
+    container.appendChild(
+      el(
+        "div",
+        "warn-line warn-line--error",
+        "Radio version detected — the whole Radio group becomes required on the site. Missing: " + radioMissing.join(", ")
+      )
+    );
   }
 
   // Stems SOLTAS (WAVs numa pasta Stems/, nao um .zip): o site aceita as stems
