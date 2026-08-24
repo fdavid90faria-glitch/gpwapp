@@ -53,11 +53,14 @@ replicar exatamente este `multipart/form-data`, com header
 | Extended Mix MP3 | `xf_extended_mp3` | `extended_mp3` | ✅ |
 | Extended Instrumental | `xf_extended_instrumental` | `extended_instrumental` | ✅ |
 | Extended Instrumental Mixdown | `xf_extended_instrumental_mixdown` | `extended_instrumental_mixdown` | ✅ |
-| Radio Mix | `xf_radio_mix` | `radio_mix` | — |
-| Radio Mixdown | `xf_radio_mixdown` | `radio_mixdown` | — |
-| Radio Mix MP3 | `xf_radio_mp3` | `radio_mp3` | — |
-| Radio Instrumental | `xf_radio_instrumental` | `radio_instrumental` | — |
-| Radio Instrumental Mixdown | `xf_radio_instrumental_mixdown` | `radio_instrumental_mixdown` | — |
+| Radio Mix | `xf_radio_mix` | `radio_mix` | 🔶 grupo |
+| Radio Mixdown | `xf_radio_mixdown` | `radio_mixdown` | 🔶 grupo |
+| Radio Mix MP3 | `xf_radio_mp3` | `radio_mp3` | 🔶 grupo |
+| Radio Instrumental (Master) | `xf_radio_instrumental` | `radio_instrumental` | 🔶 grupo |
+| Radio Instrumental Mixdown | `xf_radio_instrumental_mixdown` | `radio_instrumental_mixdown` | 🔶 grupo |
+
+🔶 grupo = opcional isolado, mas se QUALQUER um dos 5 acima for enviado, os
+outros 4 passam a obrigatórios (regra 2026-08, aplicada em `upload.html`).
 | MIDI (ZIP) | `xf_midi` | `midi` | ✅ |
 | Stems (ZIP) | `xf_stems` | `stems` | ✅ |
 | Project (ZIP) | `xf_project` | `project` | ✅ |

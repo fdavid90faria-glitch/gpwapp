@@ -62,15 +62,17 @@ fn classify_wav(name_lower: &str) -> Classification {
     let master_kw = name_lower.contains("master") || name_lower.contains("mix");
 
     if radio {
-        // Radio Instrumental/Mixdown nao entram no upload (decisao do GPW).
-        // Ainda sao reconhecidos aqui — antes do master_kw — para nao caírem
-        // por engano no slot de Radio Mix master (ambos contem "mix").
+        // Radio Instrumental/Mixdown: mesmo padrao do Extended (secao acima).
+        // Checados antes do master_kw — para nao caírem por engano no slot de
+        // Radio Mix master (ambos contem "mix"). Radio Mix continua o unico
+        // obrigatorio do grupo Radio (grupo todo vira obrigatorio se qualquer
+        // um deles for enviado — regra aplicada no site, nao aqui).
         if instrumental && mixdown {
-            Classification { category: "radio_instrumental_mixdown", label: "Radio Instrumental Mixdown", role: "skip", upload_field: None, is_master: false }
+            Classification { category: "radio_instrumental_mixdown", label: "Radio Instrumental Mixdown", role: "mixdown", upload_field: Some("xf_radio_instrumental_mixdown"), is_master: false }
         } else if instrumental {
-            Classification { category: "radio_instrumental", label: "Radio Instrumental", role: "skip", upload_field: None, is_master: false }
+            Classification { category: "radio_instrumental", label: "Radio Instrumental Master", role: "instrumental", upload_field: Some("xf_radio_instrumental"), is_master: false }
         } else if mixdown {
-            Classification { category: "radio_mixdown", label: "Radio Mixdown", role: "skip", upload_field: None, is_master: false }
+            Classification { category: "radio_mixdown", label: "Radio Mixdown", role: "mixdown", upload_field: Some("xf_radio_mixdown"), is_master: false }
         } else if master_kw {
             Classification { category: "radio_mix", label: "Radio Mix (master)", role: "master", upload_field: Some("xf_radio_mix"), is_master: true }
         } else {
@@ -346,6 +348,26 @@ mod tests {
         // "Master" tambem conta como mix master.
         assert_eq!(cat("Track Master.wav"), "extended_mix");
         assert_eq!(cat("Track Radio Master.wav"), "radio_mix");
+    }
+
+    #[test]
+    fn radio_instrumental_e_mixdown_sobem_no_upload() {
+        // Ate 2026-08 esses 2 eram role "skip" / upload_field None (decisao
+        // antiga do GPW). Agora sobem como o Extended equivalente.
+        let n = "track - radio instrumental.wav".to_string();
+        let c = classify(&n, "wav", false);
+        assert_eq!(c.role, "instrumental");
+        assert_eq!(c.upload_field, Some("xf_radio_instrumental"));
+
+        let n2 = "track - radio instrumental mixdown.wav".to_string();
+        let c2 = classify(&n2, "wav", false);
+        assert_eq!(c2.role, "mixdown");
+        assert_eq!(c2.upload_field, Some("xf_radio_instrumental_mixdown"));
+
+        let n3 = "track - radio mixdown.wav".to_string();
+        let c3 = classify(&n3, "wav", false);
+        assert_eq!(c3.role, "mixdown");
+        assert_eq!(c3.upload_field, Some("xf_radio_mixdown"));
     }
 
     #[test]
