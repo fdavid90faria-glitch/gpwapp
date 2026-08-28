@@ -178,7 +178,14 @@ pub fn set_upload_cancelled(app: AppHandle, cancelled: bool) {
 #[tauri::command]
 pub async fn fetch_profile(token: String) -> Result<serde_json::Value, String> {
     let url = format!("{}/api/user/profile", crate::APP_BASE_URL);
-    let client = reqwest::Client::new();
+    // Com timeout, ao contrário do Client::new() que estava aqui — o uploader.rs
+    // já define o seu (30 min, para uploads grandes). Sem timeout, um servidor
+    // lento deixava o app à espera indefinidamente logo a seguir ao login, sem
+    // erro nenhum: parecia que tinha ficado preso.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Falha ao criar o cliente HTTP: {}", e))?;
     let resp = client
         .get(&url)
         .bearer_auth(&token)
