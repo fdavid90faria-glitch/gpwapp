@@ -266,6 +266,14 @@ pub fn analyze_stems_sum(paths: &[String]) -> Result<StemsSum, String> {
         if rate == 0 {
             rate = spec.sample_rate;
             channels = spec.channels as usize;
+        } else if spec.sample_rate != rate || spec.channels as usize != channels {
+            // Somar interleaved so faz sentido com specs iguais: um stem mono no
+            // meio de estereos desalinha TODOS os frames a partir dele e o
+            // resultado (peak/LUFS) fica errado em silencio. Melhor recusar.
+            return Err(format!(
+                "stems com formatos diferentes ({}: {} Hz/{} canais vs {} Hz/{} canais) — a soma nao e fiavel",
+                p, spec.sample_rate, spec.channels, rate, channels
+            ));
         }
         max_frames = max_frames.max(reader.duration() as u64);
         if spec.sample_format == hound::SampleFormat::Float {

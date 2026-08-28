@@ -627,7 +627,7 @@ async function onContinue() {
     ["bpm", a?.bpm ? String(a.bpm) : ""],
     ["music_key", a?.keyName || ""],
     ["daw", `${d.daw} ${d.daw_version}`.trim()],
-    ["price_eur", String(d.default_price || 200)],
+    ["price_eur", String(d.default_price || 300)],
     ["has_project_file", String(hasProject)],
     ["metadata", JSON.stringify(metadata)],
   ];
