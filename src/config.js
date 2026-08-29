@@ -10,12 +10,12 @@ export const SUPABASE_ANON_KEY =
 
 // Lista de generos do site (public/upload.html, select #selGenre).
 export const GENRES = [
-  "Afro House", "Ambient", "Bass House", "Big Room", "Breakbeat", "Breaks", "Chillout",
+  "Afro House", "Ambient", "Bass House", "Big Room", "Big Room Techno", "Breakbeat", "Breaks", "Chillout",
   "Dance", "Deep House", "Deep Tech", "Downtempo", "Drum and Bass", "Dubstep",
   "Electro House", "Funky House", "Future Bass", "Future House", "Grime",
-  "Hard Dance", "Hard Techno", "Hardcore", "Hardstyle", "House",
+  "Hard Dance", "Hard Techno", "Hardcore", "Hardstyle", "House", "Hyperpop",
   "Indie Dance", "Jackin House", "Latin Electronic", "LoFi", "Mainstage", "Melodic House", "Melodic Techno",
-  "Minimal", "Moombahton", "Neo Rave", "Nu Disco", "Organic", "Phonk", "Progressive House",
+  "Minimal", "Moombahton", "Neo Rave", "Nu Disco", "Organic", "Phonk", "Pop", "Progressive House",
   "Psy-Trance", "Slap House", "Synthwave", "Tech House", "Techno",
   "Trance", "Trap", "UK Garage",
 ];
