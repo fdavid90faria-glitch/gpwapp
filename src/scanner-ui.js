@@ -5,11 +5,18 @@
 const REQUIRED = {
   extended_mix: "Extended Mix (master)",
   extended_mixdown: "Extended Mixdown",
-  extended_instrumental: "Extended Instrumental",
-  extended_instrumental_mixdown: "Extended Instrumental Mixdown",
   midi: "MIDI",
   stems: "Stems",
   project: "Project",
+};
+
+// Grupo Instrumental: so faz sentido numa track COM vocais. Pasta sem nenhum
+// instrumental = track instrumental, e nao falta nada — em vez do aviso de
+// "falta", o QC varre o master/mixdown a procura de voz (qc.js). Se o produtor
+// enviou UM deles, a track tem vocais e o par tem de estar completo.
+const INSTRUMENTAL_GROUP = {
+  extended_instrumental: "Extended Instrumental",
+  extended_instrumental_mixdown: "Extended Instrumental Mixdown",
 };
 
 // Grupo Radio (secao 3): cada um e opcional isolado, mas no site, se QUALQUER
@@ -91,12 +98,41 @@ function renderWarnings(result, container) {
     container.appendChild(w);
   }
 
+  // Instrumental: nenhum na pasta = track sem vocais (nao e falta). Com um so,
+  // a track tem voz e o par tem de vir completo.
+  const instrPresent = Object.keys(INSTRUMENTAL_GROUP).filter((cat) => present.has(cat));
+  const hasInstrumental = [...present].some((c) => c.includes("instrumental"));
+  if (!instrPresent.length) {
+    container.appendChild(
+      el(
+        "div",
+        "warn-line",
+        "No instrumental files — treating this as an instrumental track (no vocals). The audio check below will flag possible vocals in the mix."
+      )
+    );
+  } else if (instrPresent.length < Object.keys(INSTRUMENTAL_GROUP).length) {
+    const instrMissing = Object.entries(INSTRUMENTAL_GROUP)
+      .filter(([cat]) => !present.has(cat))
+      .map(([, label]) => label);
+    container.appendChild(
+      el(
+        "div",
+        "warn-line warn-line--error",
+        "Vocal track detected (an instrumental version was exported) — the site then requires the full pair. Missing: " + instrMissing.join(", ")
+      )
+    );
+  }
+
   // Grupo Radio ativado: avisa o que falta pra completar o grupo (o site
-  // bloqueia o submit se ficar incompleto).
-  const radioMissing = Object.entries(RADIO_GROUP)
+  // bloqueia o submit se ficar incompleto). Numa track sem vocais o Radio
+  // tambem nao leva versoes instrumentais.
+  const radioGroup = Object.entries(RADIO_GROUP).filter(
+    ([cat]) => hasInstrumental || !cat.includes("instrumental")
+  );
+  const radioMissing = radioGroup
     .filter(([cat]) => !present.has(cat))
     .map(([, label]) => label);
-  if (radioMissing.length && radioMissing.length < Object.keys(RADIO_GROUP).length) {
+  if (radioMissing.length && radioMissing.length < radioGroup.length) {
     container.appendChild(
       el(
         "div",

@@ -52,11 +52,36 @@ function qcRole(f) {
   return "silence"; // indefinidos: so acusa vazio
 }
 
+// Onde vale a pena procurar voz. O Rust mede o heuristico em todos os ficheiros;
+// mostrar o aviso em todos seria ruido.
+//  - "instrumental": o produtor exportou instrumentais, logo a track TEM voz —
+//    o problema seria voz esquecida DENTRO do instrumental.
+//  - "presumed": a pasta nao tem nenhum instrumental, entao o app presume track
+//    sem vocais — e ai o que interessa e se ha voz no proprio master/mixdown.
+// Stems ficam de fora: uma stem de voz e legitima nos dois casos.
+const PRESUMED_SCAN = new Set([
+  "extended_mix",
+  "extended_mixdown",
+  "radio_mix",
+  "radio_mixdown",
+]);
+
+// Confianca minima do heuristico para valer a pena avisar (afinar aqui se
+// aparecer de mais/de menos; o calculo esta em src-tauri/src/qc.rs).
+const VOCAL_MIN_CONFIDENCE = 0.6;
+const vocalDetected = (a) => a != null && a.vocal_confidence != null && a.vocal_confidence >= VOCAL_MIN_CONFIDENCE;
+
+function vocalWatch(file, hasInstrumental) {
+  if (file.category.includes("instrumental")) return "instrumental";
+  if (!hasInstrumental && PRESUMED_SCAN.has(file.category)) return "presumed";
+  return null;
+}
+
 // Padrao GPW (secao 1 da arquitetura do ANALYZER):
 //   master  -> WAV 24-bit, peak -0.3..0 dB, LUFS short-term <= -3
 //   mixdown/stems -> WAV 24-bit, peak <= -3 dB
 //   cauda de silencio > 3s = bug de export (nao se aplica a stems)
-function validate(role, a) {
+function validate(role, a, watch) {
   const reasons = [];
   const warns = [];
   const silence = a.is_silent ? "No audio — file is empty" : null;
@@ -83,8 +108,14 @@ function validate(role, a) {
       reasons.push(`Peak ${fmtDb(p)} dB above the max -3 dB`);
   }
 
-  if (a.vocal_confidence != null && a.vocal_confidence >= 0.6)
-    warns.push(`Possible vocal detected (${Math.round(a.vocal_confidence * 100)}% confidence) — check by ear`);
+  if (watch && vocalDetected(a)) {
+    const pct = Math.round(a.vocal_confidence * 100);
+    warns.push(
+      watch === "instrumental"
+        ? `Possible vocal detected (${pct}% confidence) — check by ear`
+        : `Possible vocals detected (${pct}% confidence) — no instrumental files were found, so this was treated as an instrumental track. If it does have vocals, export the Extended Instrumental + Extended Instrumental Mixdown too. Check by ear.`
+    );
+  }
 
   if (reasons.length) return { level: "fail", reasons: reasons.concat(warns) };
   if (warns.length) return { level: "warn", reasons: warns };
@@ -165,8 +196,16 @@ function appendQcLines(row, verdict) {
 // Roda o QC sobre o resultado do scan e vai pintando as fileiras. Nao bloqueia
 // o upload — so indica. `isCurrent()` descarta resultados de um scan antigo.
 export async function runQc(scan, isCurrent, warningsEl) {
+  const hasInstrumental = scan.files.some((f) => f.category.includes("instrumental"));
   const items = scan.files
-    .map((file, index) => ({ file, index, role: qcRole(file), analysis: null, verdict: null }))
+    .map((file, index) => ({
+      file,
+      index,
+      role: qcRole(file),
+      watch: vocalWatch(file, hasInstrumental),
+      analysis: null,
+      verdict: null,
+    }))
     .filter((x) => x.role);
   if (!items.length) return;
 
@@ -177,7 +216,7 @@ export async function runQc(scan, isCurrent, warningsEl) {
     while ((x = queue.shift())) {
       try {
         x.analysis = await invoke("qc_analyze", { path: x.file.path, category: x.file.category });
-        x.verdict = validate(x.role, x.analysis);
+        x.verdict = validate(x.role, x.analysis, x.watch);
       } catch (e) {
         x.verdict = { level: "fail", reasons: [`Could not analyze: ${e}`] };
       }
@@ -210,6 +249,14 @@ export async function runQc(scan, isCurrent, warningsEl) {
     } catch (e) { /* soma indisponivel — nao bloqueia */ }
   }
   const failed = items.filter((x) => x.verdict && x.verdict.level === "fail").length;
+  // Possivel voz numa track presumida instrumental: nao reprova nada, mas nao
+  // pode ficar debaixo de um "✓ tudo certo" — sobe para o resumo.
+  for (const x of items) {
+    if (x.watch === "presumed" && vocalDetected(x.analysis))
+      cross.push(
+        `"${x.file.filename}": possible vocals detected (${Math.round(x.analysis.vocal_confidence * 100)}% confidence) — no instrumental files in the folder. If the track has vocals, export the instrumental versions too.`
+      );
+  }
 
   if (cross.length || failed) {
     // Bloco estruturado: um titulo + cada problema na sua propria linha (antes
