@@ -6,7 +6,8 @@
 //   - peak / RMS         <- astats
 //   - LUFS I / S max     <- ebur128 (crate ebur128, mesmo algoritmo EBU R128)
 //   - silencio no final  <- silencedetect noise=-60dB
-//   - vocal (heuristico) <- RMS da banda 300-3400 Hz vs RMS total
+//   - vocal (heuristico) <- RMS da banda 300-3400 Hz vs RMS total, pesado pelo
+//                           quanto dessa banda esta ao CENTRO (mid vs side)
 // As regras de julgamento (o que reprova) ficam no JS (src/qc.js), portadas
 // do validate() do ANALYZER.
 
@@ -30,11 +31,19 @@ pub struct QcAnalysis {
     pub is_silent: bool,
     /// segundos de silencio no FINAL do arquivo (bug de export do DAW)
     pub trailing_silence_secs: f64,
-    /// 0..1, so preenchido para categorias instrumentais
+    /// 0..1; None so quando o heuristico e desligado (category vazia) ou o
+    /// arquivo e mudo. Quem decide MOSTRAR o aviso e o JS (src/qc.js).
     pub vocal_confidence: Option<f64>,
 }
 
 const SILENCE_AMP: f32 = 0.001; // -60 dBFS
+
+// Quanto a banda vocal precisa estar mais forte no MID que no SIDE para contar
+// como "voz ao centro". Abaixo do minimo o conteudo e largo (supersaw, pads,
+// reverb) e nao parece voz; acima do maximo esta praticamente todo ao centro.
+// Sao as duas constantes a afinar se o aviso aparecer de mais/de menos.
+const VOCAL_CENTER_MIN_DB: f64 = 3.0;
+const VOCAL_CENTER_MAX_DB: f64 = 9.0;
 
 fn db(amp: f64) -> Option<f64> {
     (amp > 0.0).then(|| 20.0 * amp.log10())
@@ -83,6 +92,52 @@ impl Biquad {
     }
 }
 
+/// Acumuladores do heuristico de vocal: energia na banda 300-3400 Hz (onde
+/// vivem os formantes) e, em estereo, quanto dessa banda esta ao CENTRO. Um
+/// vocal e quase sempre mono no meio; o que enche essa banda numa track de EDM
+/// sem voz (supersaws, pads, plucks, reverb) e largo. Sem o mid/side o
+/// heuristico acendia em quase qualquer master.
+struct Band {
+    hp: Vec<Biquad>,
+    lp: Vec<Biquad>,
+    sumsq: f64,
+    mid_sumsq: f64,
+    side_sumsq: f64,
+    /// ultima amostra filtrada do canal esquerdo (so usada em estereo)
+    prev_left: f64,
+}
+
+impl Band {
+    fn new(channels: usize, rate: f64) -> Band {
+        Band {
+            hp: (0..channels).map(|_| Biquad::new(true, 300.0, rate)).collect(),
+            lp: (0..channels).map(|_| Biquad::new(false, 3400.0, rate)).collect(),
+            sumsq: 0.0,
+            mid_sumsq: 0.0,
+            side_sumsq: 0.0,
+            prev_left: 0.0,
+        }
+    }
+
+    /// 0..1: quanto do conteudo da banda vocal esta ao centro. Mono (1 canal ou
+    /// 3+) nao da para medir -> 1.0, fica so o criterio de banda.
+    fn center_factor(&self, channels: usize) -> f64 {
+        if channels != 2 {
+            return 1.0;
+        }
+        if self.mid_sumsq <= 0.0 {
+            return 0.0;
+        }
+        if self.side_sumsq <= 0.0 {
+            return 1.0; // tudo ao centro (mono duplicado nos dois canais)
+        }
+        // razao de energias -> dB (o /n cancela, e uma razao)
+        let dom_db = 10.0 * (self.mid_sumsq / self.side_sumsq).log10();
+        ((dom_db - VOCAL_CENTER_MIN_DB) / (VOCAL_CENTER_MAX_DB - VOCAL_CENTER_MIN_DB))
+            .clamp(0.0, 1.0)
+    }
+}
+
 /// Acumuladores do streaming: um `push(sample)` por amostra intercalada.
 struct Acc {
     channels: usize,
@@ -98,7 +153,7 @@ struct Acc {
     sample_idx: u64,
     short_max: f64,
     short_max_t: f64,
-    band: Option<(Vec<Biquad>, Vec<Biquad>, f64)>, // (hp, lp, band_sumsq) por canal
+    band: Option<Band>,
 }
 
 impl Acc {
@@ -112,10 +167,22 @@ impl Acc {
         }
         self.sumsq += (s as f64) * (s as f64);
         self.n += 1;
-        if let Some((hp, lp, band_sumsq)) = self.band.as_mut() {
+        if let Some(band) = self.band.as_mut() {
             let ch = (self.sample_idx % self.channels as u64) as usize;
-            let b = lp[ch].process(hp[ch].process(s as f64));
-            *band_sumsq += b * b;
+            let b = band.lp[ch].process(band.hp[ch].process(s as f64));
+            band.sumsq += b * b;
+            // mid/side so faz sentido em estereo. O filtro e linear, entao
+            // filtrar-e-somar da o mesmo que somar-e-filtrar.
+            if self.channels == 2 {
+                if ch == 0 {
+                    band.prev_left = b;
+                } else {
+                    let mid = (band.prev_left + b) / 2.0;
+                    let side = (band.prev_left - b) / 2.0;
+                    band.mid_sumsq += mid * mid;
+                    band.side_sumsq += side * side;
+                }
+            }
         }
         self.sample_idx += 1;
         self.buf.push(s);
@@ -144,8 +211,10 @@ impl Acc {
     }
 }
 
-/// Analisa um WAV do disco. `category` liga o heuristico de vocal quando
-/// contem "instrumental" (mesma regra do ANALYZER).
+/// Analisa um WAV do disco. O heuristico de vocal corre para TODO ficheiro com
+/// `category` nao vazia (mesma regra do ANALYZER): quando o produtor nao envia
+/// instrumentais, a track e presumida sem voz e e o master/mixdown que precisa
+/// de ser varrido. Quem decide mostrar o aviso e o JS (src/qc.js).
 pub fn analyze(path: &str, category: &str) -> Result<QcAnalysis, String> {
     let mut reader =
         hound::WavReader::open(path).map_err(|e| format!("Could not read WAV: {}", e))?;
@@ -161,11 +230,7 @@ pub fn analyze(path: &str, category: &str) -> Result<QcAnalysis, String> {
     let ebur = EbuR128::new(spec.channels as u32, rate, Mode::I | Mode::S)
         .map_err(|e| format!("ebur128: {}", e))?;
     let hop = (rate as usize / 10).max(1) * channels;
-    let band = category.contains("instrumental").then(|| {
-        let hp = (0..channels).map(|_| Biquad::new(true, 300.0, rate as f64)).collect();
-        let lp = (0..channels).map(|_| Biquad::new(false, 3400.0, rate as f64)).collect();
-        (hp, lp, 0.0)
-    });
+    let band = (!category.is_empty()).then(|| Band::new(channels, rate as f64));
     let mut acc = Acc {
         channels,
         rate,
@@ -202,15 +267,14 @@ pub fn analyze(path: &str, category: &str) -> Result<QcAnalysis, String> {
         None => duration,
     };
     let vocal_confidence = match (&acc.band, rms, is_silent) {
-        (Some((_, _, band_sumsq)), Some(rms), false) if acc.n > 0 => {
-            let band_rms = (band_sumsq / acc.n as f64).sqrt();
-            match (db(rms), db(band_rms)) {
-                (Some(o), Some(b)) => {
-                    // diff <= 2 dB -> 1.0 ; diff >= 10 dB -> 0.0 ; linear no meio
-                    Some(((10.0 - (o - b)) / 8.0).clamp(0.0, 1.0))
-                }
-                _ => Some(0.0),
-            }
+        (Some(band), Some(rms), false) if acc.n > 0 => {
+            let band_rms = (band.sumsq / acc.n as f64).sqrt();
+            let level = match (db(rms), db(band_rms)) {
+                // diff <= 2 dB -> 1.0 ; diff >= 10 dB -> 0.0 ; linear no meio
+                (Some(o), Some(b)) => ((10.0 - (o - b)) / 8.0).clamp(0.0, 1.0),
+                _ => 0.0,
+            };
+            Some(level * band.center_factor(channels))
         }
         _ => None,
     };
@@ -382,7 +446,9 @@ mod tests {
         assert!(a.lufs_short_max_time.is_some());
         assert!(!a.is_silent);
         assert!(a.trailing_silence_secs < 0.1);
-        assert!(a.vocal_confidence.is_none(), "master nao roda heuristico");
+        // heuristico corre para toda categoria nao vazia (o master tambem: e
+        // nele que se procura vocal quando nao ha instrumental na pasta)
+        assert!(a.vocal_confidence.is_some());
     }
 
     #[test]
@@ -430,6 +496,49 @@ mod tests {
         let s = analyze(&gen("sub.wav", 40.0, 0.5, 4.0, 0.0, 24), "extended_instrumental").unwrap();
         assert!(v.vocal_confidence.unwrap() > 0.6, "800Hz: {:?}", v.vocal_confidence);
         assert!(s.vocal_confidence.unwrap() < 0.3, "40Hz: {:?}", s.vocal_confidence);
+    }
+
+    /// Gera um WAV estereo com conteudo DIFERENTE em cada canal (L/R
+    /// descorrelacionados = som largo, mid ~= side).
+    fn gen_wide(name: &str, f_left: f64, f_right: f64, amp: f64, secs: f64) -> String {
+        let dir = std::env::temp_dir().join("gpw_qc_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let rate = 44100u32;
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: rate,
+            bits_per_sample: 24,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        let max = ((1i64 << 23) - 1) as f64;
+        for i in 0..(secs * rate as f64) as u64 {
+            let t = i as f64 / rate as f64;
+            for f in [f_left, f_right] {
+                let v = amp * (2.0 * std::f64::consts::PI * f * t).sin();
+                w.write_sample((v * max) as i32).unwrap();
+            }
+        }
+        w.finalize().unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn conteudo_largo_na_banda_vocal_nao_acende() {
+        // Mesma energia na banda 300-3400 que o "vocalish", mas espalhada em
+        // estereo (L 800 Hz, R 1100 Hz): mid ~= side, logo nao parece voz.
+        // E isto que evita o aviso em cima de qualquer supersaw de EDM.
+        let wide = analyze(&gen_wide("wide.wav", 800.0, 1100.0, 0.5, 4.0), "extended_mix").unwrap();
+        let center = analyze(&gen("center.wav", 800.0, 0.5, 4.0, 0.0, 24), "extended_mix").unwrap();
+        assert!(wide.vocal_confidence.unwrap() < 0.3, "largo: {:?}", wide.vocal_confidence);
+        assert!(center.vocal_confidence.unwrap() > 0.6, "centro: {:?}", center.vocal_confidence);
+    }
+
+    #[test]
+    fn categoria_vazia_desliga_o_heuristico() {
+        let a = analyze(&gen("sem_cat.wav", 800.0, 0.5, 2.0, 0.0, 24), "").unwrap();
+        assert!(a.vocal_confidence.is_none());
     }
 
     #[test]
