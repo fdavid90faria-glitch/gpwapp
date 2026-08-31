@@ -34,6 +34,11 @@ hound = "3.5"
 ebur128 = "0.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# DPAPI (CryptProtectData) para cifrar a sessao em disco. Ja vem no lock via
+# tauri, por isso nao acrescenta tempo de build.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
 [dev-dependencies]
 # Runtime só para os testes (em produção o runtime vem do Tauri).
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

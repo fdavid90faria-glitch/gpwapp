@@ -202,6 +202,68 @@ pub async fn fetch_profile(token: String) -> Result<serde_json::Value, String> {
     Ok(body.get("profile").cloned().unwrap_or(serde_json::Value::Null))
 }
 
+// --- Cifra em repouso da sessao (DPAPI) -------------------------------------
+// O auth.json era gravado em texto simples: quem tivesse acesso ao perfil
+// Windows (ou um malware) copiava o ficheiro e passava a agir como o produtor
+// no site. Agora o conteudo e cifrado com o DPAPI do Windows, que amarra o
+// resultado a ESTA conta de utilizador: copiado para outra maquina ou aberto
+// por outro utilizador, nao decifra.
+//
+// Limite honesto: nao protege contra codigo a correr COMO o proprio produtor
+// (o Windows decifra-lhe a pedido). O que fecha e a copia do ficheiro — para
+// backup, pasta sincronizada, outro perfil ou outro PC.
+#[cfg(windows)]
+mod crypt {
+    use std::ptr;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB,
+    };
+
+    fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
+        CRYPT_INTEGER_BLOB {
+            cbData: data.len() as u32,
+            pbData: data.as_ptr() as *mut u8,
+        }
+    }
+
+    /// Copia o resultado para um Vec e liberta a memoria que o Windows alocou.
+    /// Sem o LocalFree cada gravacao/leitura perdia uns bytes para sempre.
+    unsafe fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
+        let v = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+        LocalFree(out.pbData as *mut _);
+        v
+    }
+
+    pub fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
+        let mut input = blob(plain);
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: ptr::null_mut() };
+        let ok = unsafe {
+            CryptProtectData(&mut input, ptr::null(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), 0, &mut out)
+        };
+        if ok == 0 { return Err("CryptProtectData falhou".into()) }
+        Ok(unsafe { take(out) })
+    }
+
+    pub fn unprotect(cipher: &[u8]) -> Result<Vec<u8>, String> {
+        let mut input = blob(cipher);
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: ptr::null_mut() };
+        let ok = unsafe {
+            CryptUnprotectData(&mut input, ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), 0, &mut out)
+        };
+        if ok == 0 { return Err("CryptUnprotectData falhou".into()) }
+        Ok(unsafe { take(out) })
+    }
+}
+
+// Fora do Windows nao ha DPAPI. O app so e distribuido para Windows; isto
+// existe para o `cargo test`/`cargo check` continuarem a compilar noutro SO.
+#[cfg(not(windows))]
+mod crypt {
+    pub fn protect(plain: &[u8]) -> Result<Vec<u8>, String> { Ok(plain.to_vec()) }
+    pub fn unprotect(cipher: &[u8]) -> Result<Vec<u8>, String> { Ok(cipher.to_vec()) }
+}
+
 // --- Persistencia da sessao (Fase 5) ---------------------------------------
 // Guardada em arquivo na pasta de config do app (sobrevive a fechar/reabrir,
 // ao contrario do localStorage do webview). O frontend renova o token no boot.
@@ -212,37 +274,87 @@ fn auth_file(app: &AppHandle) -> Result<PathBuf, String> {
         .app_config_dir()
         .map_err(|e| format!("Config dir indisponível: {}", e))?;
     fs::create_dir_all(&dir).map_err(|e| format!("Falha ao criar config dir: {}", e))?;
+    Ok(dir.join("auth.dat"))
+}
+
+/// Ficheiro antigo, em texto simples. So existe em instalacoes anteriores a
+/// esta versao; e lido uma vez para migrar e apagado a seguir.
+fn legacy_auth_file(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Config dir indisponível: {}", e))?;
     Ok(dir.join("auth.json"))
 }
 
-/// Grava a sessao (JSON) em disco.
+/// Grava a sessao (JSON) cifrada em disco.
 #[tauri::command]
 pub fn save_auth(app: AppHandle, data: String) -> Result<(), String> {
     let path = auth_file(&app)?;
-    fs::write(&path, data).map_err(|e| format!("Falha ao salvar sessão: {}", e))
+    let sealed = crypt::protect(data.as_bytes())?;
+    fs::write(&path, sealed).map_err(|e| format!("Falha ao salvar sessão: {}", e))?;
+    // Se ainda existir o ficheiro em texto simples, desaparece agora.
+    let _ = fs::remove_file(legacy_auth_file(&app)?);
+    Ok(())
 }
 
 /// Le a sessao gravada (None se nao houver).
 #[tauri::command]
 pub fn load_auth(app: AppHandle) -> Result<Option<String>, String> {
     let path = auth_file(&app)?;
-    match fs::read_to_string(&path) {
-        Ok(s) => Ok(Some(s)),
+    if let Ok(sealed) = fs::read(&path) {
+        // Decifrar falha se o ficheiro foi copiado de outra conta/maquina, ou
+        // se estiver corrompido. Nao e erro: trata-se como "sem sessao" e o
+        // produtor faz login outra vez.
+        return match crypt::unprotect(&sealed) {
+            Ok(plain) => Ok(String::from_utf8(plain).ok()),
+            Err(_) => Ok(None),
+        };
+    }
+    // Migracao de quem ja tinha o auth.json em texto simples: le, regrava
+    // cifrado e apaga o antigo. O produtor nao da por nada (nao e deslogado).
+    let legacy = legacy_auth_file(&app)?;
+    match fs::read_to_string(&legacy) {
+        Ok(s) => {
+            let _ = save_auth(app, s.clone());
+            Ok(Some(s))
+        }
         Err(_) => Ok(None),
     }
 }
 
-/// Apaga a sessao gravada (logout).
+/// Apaga a sessao gravada (logout). Apaga tambem o ficheiro antigo, para uma
+/// instalacao a meio da migracao nao deixar o token em texto simples atras.
 #[tauri::command]
 pub fn clear_auth(app: AppHandle) -> Result<(), String> {
-    let path = auth_file(&app)?;
-    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(auth_file(&app)?);
+    let _ = fs::remove_file(legacy_auth_file(&app)?);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::read_wav_head;
+
+    /// A sessao tem de voltar exatamente igual depois de cifrada e decifrada.
+    /// Se isto partir, o produtor e deslogado a cada arranque do app.
+    #[test]
+    fn sessao_sobrevive_ao_ciclo_de_cifra() {
+        let sessao = r#"{"accessToken":"eyJhbGciOi.abc","refreshToken":"r-123","expiresAt":1799999999,"email":"a@b.com"}"#;
+        let selado = super::crypt::protect(sessao.as_bytes()).expect("cifrar");
+        assert_ne!(selado, sessao.as_bytes(), "o conteudo tem de sair diferente do texto simples");
+        let aberto = super::crypt::unprotect(&selado).expect("decifrar");
+        assert_eq!(String::from_utf8(aberto).unwrap(), sessao);
+    }
+
+    /// Ficheiro corrompido ou vindo de outra conta Windows nao pode rebentar o
+    /// arranque: tem de falhar, para o load_auth devolver None e pedir login.
+    #[cfg(windows)]
+    #[test]
+    fn lixo_nao_decifra() {
+        assert!(super::crypt::unprotect(b"nao sou um blob do DPAPI").is_err());
+    }
+
 
     /// WAV PCM mono 8-bit sintetico: byte_rate=8 (8 bytes/segundo).
     fn wav_fixture(data_len: u32) -> Vec<u8> {
