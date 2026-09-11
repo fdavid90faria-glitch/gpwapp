@@ -696,6 +696,45 @@ async fn commit_file(
     }
 }
 
+/// A CSP do webview e o glue do Essentia estao amarrados um ao outro: o
+/// Emscripten/embind usa `new Function(...)`, que exige 'unsafe-eval'. Trocar
+/// por 'wasm-unsafe-eval' (que so cobre WebAssembly) mata a detecao de BPM/Key
+/// em silencio — o app mostra "Could not auto-detect" e ninguem liga a causa a
+/// CSP. Aconteceu: a troca foi feita num hardening, ficou meses por lancar, e
+/// so estourou quando saiu na build 3.11.0.
+#[cfg(test)]
+mod csp_vs_essentia {
+    use std::path::PathBuf;
+
+    fn ler(rel: &str) -> String {
+        let p: PathBuf = [env!("CARGO_MANIFEST_DIR"), rel].iter().collect();
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("nao li {:?}: {}", p, e))
+    }
+
+    #[test]
+    fn se_o_essentia_usa_new_function_a_csp_tem_de_permitir_eval() {
+        let glue = ler("../src/essentia/essentia-wasm.web.js");
+        let precisa_eval = glue.contains("new Function") || glue.contains(" eval(");
+        let csp = ler("tauri.conf.json");
+        if precisa_eval {
+            assert!(
+                csp.contains("'unsafe-eval'"),
+                "o glue do Essentia usa new Function, logo a CSP TEM de ter 'unsafe-eval'. \
+                 Com 'wasm-unsafe-eval' apenas, a detecao de BPM/Key morre em silencio."
+            );
+        }
+    }
+
+    #[test]
+    fn a_csp_continua_a_fechar_o_resto() {
+        // Repor o 'unsafe-eval' nao pode servir de desculpa para abrir tudo.
+        let csp = ler("tauri.conf.json");
+        assert!(csp.contains("default-src 'self'"), "a base da CSP tem de continuar 'self'");
+        assert!(!csp.contains("script-src *"), "script-src aberto a tudo");
+        assert!(!csp.contains("connect-src *"), "connect-src aberto a tudo");
+    }
+}
+
 #[cfg(test)]
 mod part_math {
     use super::{part_count, part_range, MULTIPART_MIN, PART_SIZE};
