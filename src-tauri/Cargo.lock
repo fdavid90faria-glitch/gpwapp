@@ -1440,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "gpwapp"
-version = "3.10.0"
+version = "3.11.0"
 dependencies = [
  "ebur128",
  "futures-util",

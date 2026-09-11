@@ -64,6 +64,20 @@ struct FileProgress {
     percent: u64,
 }
 
+// ── UPLOAD EM PEDACOS (multipart do R2) ──────────────────────
+// Um PUT unico de um ficheiro grande morre com qualquer soluco de rede, e o
+// retry que ja existia reenviava o ficheiro INTEIRO desde o inicio. Pior: o
+// cliente tem timeout de 30 min, e 2GB numa ligacao de 2 Mbps levam ~140 min —
+// abortava sempre, por melhor que a ligacao estivesse.
+//
+// Em pedacos: cada PUT e pequeno (cabe no timeout com folga) e uma falha
+// reenvia so aquele pedaco. Usa a MESMA rota que o site (validada contra o R2
+// real): /api/tracks/upload-multipart. O servidor nao precisou de mudar nada.
+const MULTIPART_MIN: u64 = 96 * 1024 * 1024; // abaixo disto, PUT unico como antes
+const PART_SIZE: u64 = 64 * 1024 * 1024; // minimo do S3/R2 e 5MB
+const SIGN_BATCH: u32 = 10; // assinaturas pedidas de cada vez (o servidor aceita ate 50)
+const PART_ATTEMPTS: u32 = 3;
+
 fn mime_for(ext: &str) -> &'static str {
     match ext.to_lowercase().as_str() {
         "wav" => "audio/wav",
@@ -123,6 +137,252 @@ async fn progress_body(app: &AppHandle, uf: &UploadFile) -> Result<(reqwest::Bod
         chunk
     });
     Ok((reqwest::Body::wrap_stream(stream), total))
+}
+
+/// Intervalo [offset, len) do pedaco `part_n` (1-based). None se o pedaco cai
+/// fora do ficheiro. Funcao PURA de proposito: e aqui que mora o unico erro que
+/// nao da erro nenhum — um offset trocado sobe um ficheiro corrompido em
+/// silencio. Os testes no fim do ficheiro cobrem-na.
+fn part_range(part_n: u32, total: u64) -> Option<(u64, u64)> {
+    if part_n == 0 {
+        return None;
+    }
+    let offset = (part_n as u64 - 1) * PART_SIZE;
+    if offset >= total {
+        return None;
+    }
+    Some((offset, PART_SIZE.min(total - offset)))
+}
+
+/// Quantos pedacos para um ficheiro deste tamanho.
+fn part_count(total: u64) -> u32 {
+    total.div_ceil(PART_SIZE) as u32
+}
+
+/// Corpo de UM pedaco: le so o intervalo [offset, offset+len) do ficheiro, em
+/// streaming. O progresso emitido e o do FICHEIRO inteiro (offset + enviados),
+/// senao a barra saltava para 0% a cada pedaco novo.
+async fn part_body(
+    app: &AppHandle,
+    uf: &UploadFile,
+    offset: u64,
+    len: u64,
+    total_file: u64,
+) -> Result<reqwest::Body, String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut f = tokio::fs::File::open(&uf.path)
+        .await
+        .map_err(|e| format!("{}: falha ao abrir ({})", uf.filename, e))?;
+    f.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|e| format!("{}: falha ao posicionar ({})", uf.filename, e))?;
+    // take(len) garante que este pedaco NAO invade o seguinte.
+    let limited = f.take(len);
+
+    let cancel = app.state::<CancelFlag>().0.clone();
+    let app_c = app.clone();
+    let field = uf.field.clone();
+    let filename = uf.filename.clone();
+    let mut sent: u64 = 0;
+    let mut last_pct: u64 = u64::MAX;
+    let stream = ReaderStream::new(limited).map(move |chunk| {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "upload cancelled",
+            ));
+        }
+        if let Ok(ref bytes) = chunk {
+            sent += bytes.len() as u64;
+            let done = offset + sent;
+            let percent = if total_file > 0 { (done * 100 / total_file).min(100) } else { 100 };
+            if percent != last_pct {
+                last_pct = percent;
+                let _ = app_c.emit(
+                    "upload:file-progress",
+                    FileProgress {
+                        field: field.clone(),
+                        filename: filename.clone(),
+                        sent: done,
+                        total: total_file,
+                        percent,
+                    },
+                );
+            }
+        }
+        chunk
+    });
+    Ok(reqwest::Body::wrap_stream(stream))
+}
+
+/// Chamada JSON a /api/tracks/upload-multipart (create/sign/complete/abort).
+async fn mp_call(
+    client: &reqwest::Client,
+    token: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let url = format!("{}/api/tracks/upload-multipart", APP_BASE_URL);
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Falha de rede no upload em pedacos: {}", e))?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
+    if !status.is_success() || !json.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
+        let msg = json
+            .get("error")
+            .and_then(|e| e.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| status_message(status.as_u16()));
+        return Err(msg);
+    }
+    Ok(json)
+}
+
+/// PUT de UM pedaco, com tentativas. Um 4xx e deterministico e nao repete; o
+/// cancelamento do produtor sai imediatamente.
+async fn put_one_part(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    url: &str,
+    file: &UploadFile,
+    offset: u64,
+    len: u64,
+    total_file: u64,
+) -> Result<(), String> {
+    let mut last_err = String::new();
+    for attempt in 1..=PART_ATTEMPTS {
+        let body = part_body(app, file, offset, len, total_file).await?;
+        let sent = client
+            .put(url)
+            .header(reqwest::header::CONTENT_LENGTH, len)
+            .body(body)
+            .send()
+            .await;
+        match sent {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) => {
+                let st = r.status();
+                last_err = format!("Storage rejected a chunk (HTTP {}).", st.as_u16());
+                if !st.is_server_error() {
+                    break; // 4xx nao adianta repetir
+                }
+            }
+            Err(e) => {
+                if is_cancelled(app) {
+                    return Err("Upload cancelled.".into());
+                }
+                last_err = format!("Falha de rede no upload: {}", e);
+            }
+        }
+        if attempt < PART_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+        }
+    }
+    Err(last_err)
+}
+
+/// Sobe todos os pedacos, pedindo as assinaturas em lotes (URLs sempre frescas
+/// num upload longo).
+async fn put_all_parts(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    token: &str,
+    file: &UploadFile,
+    path: &str,
+    upload_id: &str,
+    total: u64,
+    n_parts: u32,
+) -> Result<(), String> {
+    let mut n = 1u32;
+    while n <= n_parts {
+        let last = (n + SIGN_BATCH - 1).min(n_parts);
+        let nums: Vec<u32> = (n..=last).collect();
+        let signed = mp_call(
+            client,
+            token,
+            serde_json::json!({ "action": "sign", "path": path, "uploadId": upload_id, "parts": nums }),
+        )
+        .await?;
+        let urls = signed
+            .get("urls")
+            .and_then(|u| u.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if urls.len() != nums.len() {
+            return Err("Upload em pedacos: o servidor devolveu assinaturas a menos.".into());
+        }
+        for item in urls {
+            let part_n = item.get("part").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            if part_n == 0 || url.is_empty() {
+                return Err("Upload em pedacos: assinatura invalida.".into());
+            }
+            let (offset, len) = part_range(part_n, total)
+                .ok_or_else(|| "Upload em pedacos: pedaco fora do ficheiro.".to_string())?;
+            put_one_part(app, client, url, file, offset, len, total).await?;
+        }
+        n = last + 1;
+    }
+    Ok(())
+}
+
+/// Sobe um ficheiro grande em pedacos e devolve o path final no R2.
+/// Em qualquer falha, cancela o upload no R2 — senao os pedacos ja enviados
+/// ficam a ocupar espaco faturavel, invisiveis na listagem do bucket.
+async fn put_in_parts(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    token: &str,
+    file: &UploadFile,
+    fkey: &str,
+    total: u64,
+) -> Result<String, String> {
+    let created = mp_call(
+        client,
+        token,
+        serde_json::json!({ "action": "create", "fkey": fkey, "filename": file.filename }),
+    )
+    .await?;
+    let upload_id = created
+        .get("uploadId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let path = created
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if upload_id.is_empty() || path.is_empty() {
+        return Err("Upload em pedacos: resposta incompleta do servidor.".into());
+    }
+
+    let n_parts = part_count(total);
+    match put_all_parts(app, client, token, file, &path, &upload_id, total, n_parts).await {
+        Ok(()) => {
+            mp_call(
+                client,
+                token,
+                serde_json::json!({ "action": "complete", "path": path, "uploadId": upload_id }),
+            )
+            .await?;
+            Ok(path)
+        }
+        Err(e) => {
+            let _ = mp_call(
+                client,
+                token,
+                serde_json::json!({ "action": "abort", "path": path, "uploadId": upload_id }),
+            )
+            .await;
+            Err(e)
+        }
+    }
 }
 
 /// Constroi um Part multipart que transmite o arquivo em streaming.
@@ -296,11 +556,14 @@ pub async fn add_file(
     draft_id: String,
     file: UploadFile,
 ) -> Result<DraftResult, String> {
-    if tokio::fs::metadata(&file.path).await.is_err() {
-        let msg = format!("File not found: {}", file.filename);
-        progress(&app, "error", msg.clone());
-        return Err(msg);
-    }
+    let file_size = match tokio::fs::metadata(&file.path).await {
+        Ok(m) => m.len(),
+        Err(_) => {
+            let msg = format!("File not found: {}", file.filename);
+            progress(&app, "error", msg.clone());
+            return Err(msg);
+        }
+    };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60 * 30))
         .build()
@@ -316,6 +579,21 @@ pub async fn add_file(
     let err_result = |status: u16, message: String| {
         Ok(DraftResult { ok: false, status, id: None, message, warnings: vec![] })
     };
+
+    // FICHEIRO GRANDE: vai em pedacos e salta os passos 1 e 2 abaixo (o
+    // create/sign/complete trata de tudo e devolve o path final).
+    if file_size > MULTIPART_MIN {
+        return match put_in_parts(&app, &client, &token, &file, &fkey, file_size).await {
+            Ok(path) => commit_file(&app, &client, &token, &draft_id, &fkey, &path, &file.filename).await,
+            Err(e) => {
+                progress(&app, "error", e.clone());
+                if e.contains("cancelled") {
+                    return Err(e);
+                }
+                err_result(0, e)
+            }
+        };
+    }
 
     // 1) Pede a URL assinada de PUT. Payload minusculo — passa pelo Cloudflare.
     let url_endpoint = format!("{}/api/app/draft-file-url", APP_BASE_URL);
@@ -385,22 +663,128 @@ pub async fn add_file(
     }
 
     // 3) Confirma no site — regista o ficheiro em metadata.files[fkey].
+    commit_file(&app, &client, &token, &draft_id, &fkey, &path, &file.filename).await
+}
+
+/// Passo final, comum aos dois caminhos (PUT unico e pedacos): regista o
+/// ficheiro no rascunho. Sem isto o ficheiro fica no R2 sem pertencer a nada.
+async fn commit_file(
+    _app: &AppHandle,
+    client: &reqwest::Client,
+    token: &str,
+    draft_id: &str,
+    fkey: &str,
+    path: &str,
+    filename: &str,
+) -> Result<DraftResult, String> {
     let commit_endpoint = format!("{}/api/app/draft-file-commit", APP_BASE_URL);
     let commit_resp = client
         .post(&commit_endpoint)
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "draft_id": draft_id, "fkey": fkey, "path": path, "name": file.filename }))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "draft_id": draft_id, "fkey": fkey, "path": path, "name": filename }))
         .send()
         .await
         .map_err(|e| format!("Falha de rede ao confirmar o upload: {}", e))?;
     let commit_status = commit_resp.status();
     let commit_body: serde_json::Value = commit_resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
     if commit_status.is_success() && commit_body.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
-        Ok(DraftResult { ok: true, status: commit_status.as_u16(), id: None, message: fkey, warnings: vec![] })
+        Ok(DraftResult { ok: true, status: commit_status.as_u16(), id: None, message: fkey.to_string(), warnings: vec![] })
     } else {
         let message = commit_body.get("error").and_then(|e| e.as_str()).map(String::from)
             .unwrap_or_else(|| status_message(commit_status.as_u16()));
-        err_result(commit_status.as_u16(), message)
+        Ok(DraftResult { ok: false, status: commit_status.as_u16(), id: None, message, warnings: vec![] })
+    }
+}
+
+#[cfg(test)]
+mod part_math {
+    use super::{part_count, part_range, MULTIPART_MIN, PART_SIZE};
+
+    /// Os pedacos tem de LADRILHAR o ficheiro: sem buracos, sem sobreposicao, e
+    /// a soma tem de dar o tamanho exato. Um erro aqui nao rebenta — sobe um
+    /// ficheiro corrompido que so se descobre quando o comprador o abre.
+    fn assert_tiles(total: u64) {
+        let n = part_count(total);
+        let mut esperado_offset = 0u64;
+        let mut soma = 0u64;
+        for p in 1..=n {
+            let (offset, len) = part_range(p, total)
+                .unwrap_or_else(|| panic!("pedaco {} de {} bytes devia existir", p, total));
+            assert_eq!(offset, esperado_offset, "buraco/sobreposicao no pedaco {} ({} bytes)", p, total);
+            assert!(len > 0, "pedaco {} vazio ({} bytes)", p, total);
+            assert!(len <= PART_SIZE, "pedaco {} maior que o teto ({} bytes)", p, total);
+            esperado_offset += len;
+            soma += len;
+        }
+        assert_eq!(soma, total, "a soma dos pedacos nao da o ficheiro ({} bytes)", total);
+        // Um pedaco a mais nao pode existir: era um PUT vazio no fim.
+        assert!(part_range(n + 1, total).is_none(), "pedaco a mais em {} bytes", total);
+    }
+
+    #[test]
+    fn pedacos_ladrilham_o_ficheiro() {
+        for total in [
+            MULTIPART_MIN + 1,        // o mais pequeno que vai por pedacos
+            PART_SIZE,                // exatamente 1 pedaco
+            PART_SIZE + 1,            // 2 pedacos, o 2o com 1 byte
+            PART_SIZE * 2,            // exato, sem resto
+            PART_SIZE * 3 + 12345,    // resto qualquer
+            1_298_361_000,            // ~1.3GB, o caso real que originou isto
+            2 * 1024 * 1024 * 1024,   // 2GB, o teto dos stems
+        ] {
+            assert_tiles(total);
+        }
+    }
+
+    #[test]
+    fn ultimo_pedaco_leva_o_resto() {
+        let total = PART_SIZE * 2 + 7;
+        assert_eq!(part_range(3, total), Some((PART_SIZE * 2, 7)));
+        assert_eq!(part_count(total), 3);
+    }
+
+    #[test]
+    fn pedaco_invalido_ou_fora_do_ficheiro_nao_existe() {
+        assert_eq!(part_range(0, 1000), None, "nao ha pedaco 0 (o S3 conta de 1)");
+        assert_eq!(part_range(2, PART_SIZE), None, "ficheiro de 1 pedaco nao tem 2o");
+    }
+
+    /// A aritmetica acima diz QUE intervalos enviar; falta provar que o
+    /// seek+take le mesmo esses bytes. Usa intervalos pequenos (o mecanismo e o
+    /// mesmo a 64MB) e reconstroi o ficheiro a partir dos pedacos.
+    #[tokio::test]
+    async fn seek_e_take_reconstroem_o_ficheiro_byte_a_byte() {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let original: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let dir = std::env::temp_dir().join(format!("gpw-part-test-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let caminho = dir.join("amostra.bin");
+        tokio::fs::write(&caminho, &original).await.unwrap();
+
+        const PEDACO: u64 = 3_000; // ultimo pedaco fica com 1.000 (resto)
+        let total = original.len() as u64;
+        let mut reconstruido: Vec<u8> = Vec::new();
+        let mut offset = 0u64;
+        while offset < total {
+            let len = PEDACO.min(total - offset);
+            let mut f = tokio::fs::File::open(&caminho).await.unwrap();
+            f.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
+            let mut buf = Vec::new();
+            f.take(len).read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf.len() as u64, len, "o take leu alem do pedaco (offset {})", offset);
+            reconstruido.extend_from_slice(&buf);
+            offset += len;
+        }
+        assert_eq!(reconstruido, original, "o ficheiro remontado difere do original");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn ficheiro_de_2gb_cabe_no_limite_de_10000_pedacos_do_s3() {
+        assert!(part_count(2 * 1024 * 1024 * 1024) <= 10_000);
+        // E o teto de um pedaco respeita o minimo de 5MB do S3/R2 (exceto o ultimo).
+        assert!(PART_SIZE >= 5 * 1024 * 1024);
     }
 }
 
