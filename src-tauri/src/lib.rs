@@ -25,6 +25,7 @@ pub fn run() {
         .manage(uploader::CancelFlag(std::sync::Arc::new(
             std::sync::atomic::AtomicBool::new(false),
         )))
+        .manage(uploader::TokenBridge::default())
         .invoke_handler(tauri::generate_handler![
             commands::ping,
             commands::scan_folder,
@@ -35,6 +36,7 @@ pub fn run() {
             commands::create_draft,
             commands::add_draft_file,
             commands::set_upload_cancelled,
+            commands::provide_token,
             commands::fetch_profile,
             commands::save_auth,
             commands::load_auth,

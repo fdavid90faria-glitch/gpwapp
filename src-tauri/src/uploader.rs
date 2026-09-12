@@ -94,49 +94,134 @@ fn mime_for(ext: &str) -> &'static str {
     }
 }
 
-/// Corpo (reqwest::Body) que transmite o arquivo em streaming (sem carregar tudo
-/// em memoria) e emite "upload:file-progress" conforme os bytes sao enviados.
-/// Devolve tambem o tamanho total (para o Content-Length). Partilhado pelo
-/// multipart (create_draft) e pelo PUT direto ao R2 (add_file).
-async fn progress_body(app: &AppHandle, uf: &UploadFile) -> Result<(reqwest::Body, u64), String> {
-    let meta = tokio::fs::metadata(&uf.path)
-        .await
-        .map_err(|e| format!("{}: nao foi possivel ler ({})", uf.filename, e))?;
-    let total = meta.len();
+// ── PONTE DE TOKEN (Rust ↔ JS) ───────────────────────────────
+// O Rust nao renova sessoes: a sessao Supabase vive no JS (supabase.js). Um
+// token apanhado no inicio de um ficheiro expira (~1h) a meio de um upload de
+// horas — o `sign` da parte 21 dava 401 com o produtor logado, e o `abort`
+// seguinte tambem, deixando as partes no R2. Aqui o Rust PEDE um token fresco
+// ao JS antes de cada chamada de controlo: emite `auth:token-needed`, o JS
+// responde por `provide_token`. Sem resposta em 10s, segue com o que tinha.
+pub struct TokenBridge(pub std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>);
+impl Default for TokenBridge {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+}
 
-    let file = tokio::fs::File::open(&uf.path)
-        .await
-        .map_err(|e| format!("{}: falha ao abrir ({})", uf.filename, e))?;
-
-    // Conta os bytes enviados e emite o progresso (throttle por 1%).
-    // Se o cancelamento for pedido, injeta um erro -> o reqwest aborta o envio.
-    let cancel = app.state::<CancelFlag>().0.clone();
-    let app_c = app.clone();
-    let field = uf.field.clone();
-    let filename = uf.filename.clone();
-    let mut sent: u64 = 0;
-    let mut last_pct: u64 = u64::MAX;
-    let stream = ReaderStream::new(file).map(move |chunk| {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "upload cancelled",
-            ));
+pub fn provide_token(app: &AppHandle, token: String) {
+    if let Ok(mut slot) = app.state::<TokenBridge>().0.lock() {
+        if let Some(tx) = slot.take() {
+            let _ = tx.send(token);
         }
-        if let Ok(ref bytes) = chunk {
-            sent += bytes.len() as u64;
-            let percent = if total > 0 { (sent * 100 / total).min(100) } else { 100 };
-            if percent != last_pct {
-                last_pct = percent;
-                let _ = app_c.emit(
-                    "upload:file-progress",
-                    FileProgress { field: field.clone(), filename: filename.clone(), sent, total, percent },
-                );
+    }
+}
+
+async fn fresh_token(app: &AppHandle, fallback: &str) -> String {
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    if let Ok(mut slot) = app.state::<TokenBridge>().0.lock() {
+        *slot = Some(tx);
+    }
+    let _ = app.emit("auth:token-needed", ());
+    match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        Ok(Ok(t)) if !t.is_empty() => t,
+        _ => fallback.to_string(),
+    }
+}
+
+// ── TETO POR SLOT ─────────────────────────────────────────────
+// ESPELHO de lib/upload-exts.js (maxBytesFor) no site — se mudar la, muda
+// aqui. Verificado ANTES de enviar um byte: sem isto um WAV de 1.2GB subia
+// inteiro (~80 min a 2 Mbps) para o servidor o recusar no `complete`.
+fn max_bytes_for(fkey: &str) -> u64 {
+    if fkey == "stems" { 2 * 1024 * 1024 * 1024 } else { 1024 * 1024 * 1024 }
+}
+fn max_label_for(fkey: &str) -> &'static str {
+    if fkey == "stems" { "2GB" } else { "1GB" }
+}
+
+// ── CHAMADAS DE CONTROLO ──────────────────────────────────────
+const CONTROL_ATTEMPTS: u32 = 3;
+const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+fn backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(2 * attempt as u64)
+}
+
+/// Erro de uma chamada ao servidor ou ao R2: status HTTP (0 = rede/local) +
+/// mensagem para o produtor. O status chega ao frontend em DraftResult —
+/// antes o caminho em pedacos colapsava tudo em 0.
+#[derive(Debug, Clone)]
+struct ApiError {
+    status: u16,
+    message: String,
+}
+fn cancelled() -> ApiError {
+    ApiError { status: 0, message: "Upload cancelled.".into() }
+}
+
+/// POST JSON com Bearer, partilhado por draft-file-url, upload-multipart e
+/// draft-file-commit. Tentativas em rede/5xx/429 (todas estas chamadas sao
+/// idempotentes do lado do servidor); 4xx e deterministico e sai logo. Token
+/// FRESCO em cada tentativa (ver fresh_token).
+async fn post_json(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    token: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, ApiError> {
+    let url = format!("{}{}", APP_BASE_URL, path);
+    let mut last = ApiError { status: 0, message: String::new() };
+    for attempt in 1..=CONTROL_ATTEMPTS {
+        if is_cancelled(app) {
+            return Err(cancelled());
+        }
+        let tok = fresh_token(app, token).await;
+        // Timeout PROPRIO: o cliente e' partilhado com os PUTs (30 min). Uma
+        // chamada JSON pendurada bloqueava o cancelamento por meia hora.
+        match client
+            .post(&url)
+            .timeout(CONTROL_TIMEOUT)
+            .bearer_auth(&tok)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                let json: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
+                let ok = status.is_success() && json.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+                if ok {
+                    return Ok(json);
+                }
+                let message = json
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| status_message(status.as_u16()));
+                last = ApiError { status: status.as_u16(), message };
+                if status.is_client_error() && status.as_u16() != 429 {
+                    return Err(last);
+                }
+            }
+            Err(e) => {
+                last = ApiError { status: 0, message: format!("Falha de rede: {}", e) };
             }
         }
-        chunk
-    });
-    Ok((reqwest::Body::wrap_stream(stream), total))
+        if attempt < CONTROL_ATTEMPTS {
+            tokio::time::sleep(backoff(attempt)).await;
+        }
+    }
+    Err(last)
+}
+
+/// Corpo (reqwest::Body) do ficheiro INTEIRO em streaming, com progresso.
+/// Usado pelo multipart/form-data do create_draft. E' o part_body de offset 0.
+async fn progress_body(app: &AppHandle, uf: &UploadFile) -> Result<(reqwest::Body, u64), String> {
+    let total = tokio::fs::metadata(&uf.path)
+        .await
+        .map_err(|e| format!("{}: nao foi possivel ler ({})", uf.filename, e))?
+        .len();
+    Ok((part_body(app, uf, 0, total, total).await?, total))
 }
 
 /// Intervalo [offset, len) do pedaco `part_n` (1-based). None se o pedaco cai
@@ -159,6 +244,21 @@ fn part_count(total: u64) -> u32 {
     total.div_ceil(PART_SIZE) as u32
 }
 
+/// Abre o ficheiro posicionado em `offset` e limitado a `len` bytes. Separado
+/// do part_body para ser TESTAVEL sem AppHandle: e' aqui que um erro de seek
+/// ou de take sobe um ficheiro corrompido em silencio.
+async fn open_range(
+    path: &str,
+    offset: u64,
+    len: u64,
+) -> Result<tokio::io::Take<tokio::fs::File>, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut f = tokio::fs::File::open(path).await?;
+    f.seek(std::io::SeekFrom::Start(offset)).await?;
+    // take(len) garante que este pedaco NAO invade o seguinte.
+    Ok(f.take(len))
+}
+
 /// Corpo de UM pedaco: le so o intervalo [offset, offset+len) do ficheiro, em
 /// streaming. O progresso emitido e o do FICHEIRO inteiro (offset + enviados),
 /// senao a barra saltava para 0% a cada pedaco novo.
@@ -169,16 +269,9 @@ async fn part_body(
     len: u64,
     total_file: u64,
 ) -> Result<reqwest::Body, String> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-    let mut f = tokio::fs::File::open(&uf.path)
+    let limited = open_range(&uf.path, offset, len)
         .await
         .map_err(|e| format!("{}: falha ao abrir ({})", uf.filename, e))?;
-    f.seek(std::io::SeekFrom::Start(offset))
-        .await
-        .map_err(|e| format!("{}: falha ao posicionar ({})", uf.filename, e))?;
-    // take(len) garante que este pedaco NAO invade o seguinte.
-    let limited = f.take(len);
 
     let cancel = app.state::<CancelFlag>().0.clone();
     let app_c = app.clone();
@@ -216,78 +309,122 @@ async fn part_body(
     Ok(reqwest::Body::wrap_stream(stream))
 }
 
-/// Chamada JSON a /api/tracks/upload-multipart (create/sign/complete/abort).
-async fn mp_call(
-    client: &reqwest::Client,
-    token: &str,
-    body: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let url = format!("{}/api/tracks/upload-multipart", APP_BASE_URL);
-    let resp = client
-        .post(&url)
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Falha de rede no upload em pedacos: {}", e))?;
-    let status = resp.status();
-    let json: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
-    if !status.is_success() || !json.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
-        let msg = json
-            .get("error")
-            .and_then(|e| e.as_str())
-            .map(String::from)
-            .unwrap_or_else(|| status_message(status.as_u16()));
-        return Err(msg);
-    }
-    Ok(json)
+const MP_PATH: &str = "/api/tracks/upload-multipart";
+
+/// Como re-assinar uma parte cuja URL expirou (403/404). So faz sentido no
+/// multipart: uma URL de PUT unico vale 4h e o pedido morre aos 30 min.
+enum Resign<'a> {
+    None,
+    Part { path: &'a str, upload_id: &'a str, part_n: u32 },
 }
 
-/// PUT de UM pedaco, com tentativas. Um 4xx e deterministico e nao repete; o
-/// cancelamento do produtor sai imediatamente.
+fn field_str(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+/// PUT de UM pedaco (ou do ficheiro inteiro, com offset 0), com tentativas.
+/// Regras — as MESMAS que o site aplica no browser:
+///  · cancelamento do produtor sai ja, sem repetir;
+///  · 403/404 e' assinatura expirada (portatil adormeceu a meio) → pede URL NOVA
+///    para esta parte em vez de repetir a morta;
+///  · outros 4xx nao mudam com repeticao; rede/5xx/429 repetem com backoff;
+///  · abrir/posicionar o ficheiro tambem entra no retry — um antivirus ou o
+///    OneDrive a tocar no ZIP acabado de exportar da um erro transitorio.
 async fn put_one_part(
     app: &AppHandle,
     client: &reqwest::Client,
-    url: &str,
+    mut url: String,
+    resign: Resign<'_>,
+    token: &str,
     file: &UploadFile,
     offset: u64,
     len: u64,
     total_file: u64,
-) -> Result<(), String> {
-    let mut last_err = String::new();
+) -> Result<(), ApiError> {
+    let mut last = ApiError { status: 0, message: String::new() };
     for attempt in 1..=PART_ATTEMPTS {
-        let body = part_body(app, file, offset, len, total_file).await?;
-        let sent = client
-            .put(url)
+        if is_cancelled(app) {
+            return Err(cancelled());
+        }
+        // Ficheiro mudou de tamanho a meio (re-export do DAW por cima)? Sem
+        // isto o hyper falhava com "body write aborted" e nos repetiamos 3x
+        // um pedaco que nunca vai bater com o Content-Length prometido.
+        if let Ok(m) = tokio::fs::metadata(&file.path).await {
+            if m.len() != total_file {
+                return Err(ApiError {
+                    status: 0,
+                    message: format!("{}: file changed during upload — export it again and retry.", file.filename),
+                });
+            }
+        }
+        let body = match part_body(app, file, offset, len, total_file).await {
+            Ok(b) => b,
+            Err(m) => {
+                last = ApiError { status: 0, message: m };
+                if attempt < PART_ATTEMPTS {
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                continue;
+            }
+        };
+        match client
+            .put(&url)
             .header(reqwest::header::CONTENT_LENGTH, len)
             .body(body)
             .send()
-            .await;
-        match sent {
+            .await
+        {
             Ok(r) if r.status().is_success() => return Ok(()),
             Ok(r) => {
-                let st = r.status();
-                last_err = format!("Storage rejected a chunk (HTTP {}).", st.as_u16());
-                if !st.is_server_error() {
-                    break; // 4xx nao adianta repetir
+                let st = r.status().as_u16();
+                last = ApiError { status: st, message: format!("Storage rejected a chunk (HTTP {}).", st) };
+                match st {
+                    403 | 404 => match &resign {
+                        Resign::Part { path, upload_id, part_n } => {
+                            let j = post_json(
+                                app,
+                                client,
+                                token,
+                                MP_PATH,
+                                serde_json::json!({ "action": "sign", "path": path, "uploadId": upload_id, "parts": [part_n] }),
+                            )
+                            .await?;
+                            let fresh = j
+                                .get("urls")
+                                .and_then(|u| u.as_array())
+                                .and_then(|a| a.first())
+                                .map(|item| field_str(item, "url"))
+                                .unwrap_or_default();
+                            if fresh.is_empty() {
+                                last.message = "Upload em pedacos: assinatura invalida.".into();
+                                return Err(last);
+                            }
+                            url = fresh;
+                        }
+                        Resign::None => return Err(last),
+                    },
+                    429 => {}
+                    400..=499 => return Err(last),
+                    _ => {}
                 }
             }
             Err(e) => {
                 if is_cancelled(app) {
-                    return Err("Upload cancelled.".into());
+                    return Err(cancelled());
                 }
-                last_err = format!("Falha de rede no upload: {}", e);
+                last = ApiError { status: 0, message: format!("Falha de rede no upload: {}", e) };
             }
         }
         if attempt < PART_ATTEMPTS {
-            tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+            tokio::time::sleep(backoff(attempt)).await;
         }
     }
-    Err(last_err)
+    Err(last)
 }
 
 /// Sobe todos os pedacos, pedindo as assinaturas em lotes (URLs sempre frescas
-/// num upload longo).
+/// num upload longo). Verifica o cancelamento entre lotes — entre partes nao
+/// ha stream nenhum a detecta-lo.
 async fn put_all_parts(
     app: &AppHandle,
     client: &reqwest::Client,
@@ -296,15 +433,19 @@ async fn put_all_parts(
     path: &str,
     upload_id: &str,
     total: u64,
-    n_parts: u32,
-) -> Result<(), String> {
-    let mut n = 1u32;
-    while n <= n_parts {
-        let last = (n + SIGN_BATCH - 1).min(n_parts);
-        let nums: Vec<u32> = (n..=last).collect();
-        let signed = mp_call(
+) -> Result<(), ApiError> {
+    let n_parts = part_count(total);
+    for first in (1..=n_parts).step_by(SIGN_BATCH as usize) {
+        if is_cancelled(app) {
+            return Err(cancelled());
+        }
+        let last_n = (first + SIGN_BATCH - 1).min(n_parts);
+        let nums: Vec<u32> = (first..=last_n).collect();
+        let signed = post_json(
+            app,
             client,
             token,
+            MP_PATH,
             serde_json::json!({ "action": "sign", "path": path, "uploadId": upload_id, "parts": nums }),
         )
         .await?;
@@ -314,26 +455,42 @@ async fn put_all_parts(
             .cloned()
             .unwrap_or_default();
         if urls.len() != nums.len() {
-            return Err("Upload em pedacos: o servidor devolveu assinaturas a menos.".into());
+            return Err(ApiError { status: 500, message: "Upload em pedacos: o servidor devolveu assinaturas a menos.".into() });
         }
-        for item in urls {
+        for (item, expected) in urls.iter().zip(&nums) {
             let part_n = item.get("part").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            if part_n == 0 || url.is_empty() {
-                return Err("Upload em pedacos: assinatura invalida.".into());
+            let url = field_str(item, "url");
+            // A parte tem de ser a que pedimos, pela ordem: uma URL da parte 3
+            // usada para os bytes da parte 4 monta um ficheiro corrompido.
+            if part_n != *expected || url.is_empty() {
+                return Err(ApiError { status: 500, message: "Upload em pedacos: assinatura invalida.".into() });
             }
             let (offset, len) = part_range(part_n, total)
-                .ok_or_else(|| "Upload em pedacos: pedaco fora do ficheiro.".to_string())?;
-            put_one_part(app, client, url, file, offset, len, total).await?;
+                .ok_or_else(|| ApiError { status: 500, message: "Upload em pedacos: pedaco fora do ficheiro.".into() })?;
+            put_one_part(
+                app,
+                client,
+                url,
+                Resign::Part { path, upload_id, part_n },
+                token,
+                file,
+                offset,
+                len,
+                total,
+            )
+            .await?;
         }
-        n = last + 1;
     }
     Ok(())
 }
 
 /// Sobe um ficheiro grande em pedacos e devolve o path final no R2.
-/// Em qualquer falha, cancela o upload no R2 — senao os pedacos ja enviados
-/// ficam a ocupar espaco faturavel, invisiveis na listagem do bucket.
+///
+/// Fluxo LINEAR de proposito: create → partes → complete dentro de um so
+/// Result, e QUALQUER falha depois do create cancela no R2. A versao anterior
+/// tinha o complete dentro do ramo Ok com `?` — saia antes do abort, e a
+/// unica falha que acontece com 2GB ja no R2 era precisamente a que deixava
+/// as partes la para sempre (revisao de 2026-09-12).
 async fn put_in_parts(
     app: &AppHandle,
     client: &reqwest::Client,
@@ -341,42 +498,58 @@ async fn put_in_parts(
     file: &UploadFile,
     fkey: &str,
     total: u64,
-) -> Result<String, String> {
-    let created = mp_call(
+) -> Result<String, ApiError> {
+    let created = post_json(
+        app,
         client,
         token,
+        MP_PATH,
         serde_json::json!({ "action": "create", "fkey": fkey, "filename": file.filename }),
     )
     .await?;
-    let upload_id = created
-        .get("uploadId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let path = created
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let upload_id = field_str(&created, "uploadId");
+    let path = field_str(&created, "path");
     if upload_id.is_empty() || path.is_empty() {
-        return Err("Upload em pedacos: resposta incompleta do servidor.".into());
+        return Err(ApiError { status: 500, message: "Upload em pedacos: resposta incompleta do servidor.".into() });
     }
 
-    let n_parts = part_count(total);
-    match put_all_parts(app, client, token, file, &path, &upload_id, total, n_parts).await {
-        Ok(()) => {
-            mp_call(
-                client,
-                token,
-                serde_json::json!({ "action": "complete", "path": path, "uploadId": upload_id }),
-            )
-            .await?;
-            Ok(path)
+    let result: Result<(), ApiError> = async {
+        put_all_parts(app, client, token, file, &path, &upload_id, total).await?;
+        if is_cancelled(app) {
+            return Err(cancelled());
         }
+        let done = post_json(
+            app,
+            client,
+            token,
+            MP_PATH,
+            serde_json::json!({ "action": "complete", "path": path, "uploadId": upload_id }),
+        )
+        .await?;
+        // O servidor junta as partes que o R2 LISTA, nao as que enviamos. Se
+        // faltar uma (PUT que respondeu 200 sem gravar), o objeto fica com um
+        // buraco — e' aqui que se apanha, nao quando o comprador abre o ZIP.
+        let joined = done.get("parts").and_then(|p| p.as_u64()).unwrap_or(0);
+        if joined != part_count(total) as u64 {
+            return Err(ApiError {
+                status: 500,
+                message: format!("Upload em pedacos: o servidor juntou {} de {} pedacos.", joined, part_count(total)),
+            });
+        }
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => Ok(path),
         Err(e) => {
-            let _ = mp_call(
+            // Senao os pedacos ja enviados ficam a ocupar espaco faturavel no
+            // R2, invisiveis na listagem do bucket.
+            let _ = post_json(
+                app,
                 client,
                 token,
+                MP_PATH,
                 serde_json::json!({ "action": "abort", "path": path, "uploadId": upload_id }),
             )
             .await;
@@ -544,12 +717,21 @@ pub async fn create_draft(app: AppHandle, payload: UploadPayload) -> Result<Draf
     }
 }
 
+impl DraftResult {
+    fn fail(status: u16, message: String) -> Self {
+        DraftResult { ok: false, status, id: None, message, warnings: vec![] }
+    }
+}
+
 /// Anexa UM arquivo a um rascunho por UPLOAD DIRETO ao R2 (3 passos):
-///   1) /api/app/draft-file-url  -> pede uma URL assinada de PUT (JSON pequeno)
-///   2) PUT do arquivo DIRETO para o R2 (nao passa pelo backend nem pelo proxy
-///      do Cloudflare, que corta uploads > 100MB) — streaming + Content-Length
-///   3) /api/app/draft-file-commit -> confirma e regista em metadata.files
-/// Emite progresso por arquivo e tenta de novo em falha de rede (ate 3x no PUT).
+///   1) /api/app/draft-file-url  -> valida rascunho (dono/estado) e slot em <1s,
+///      ANTES de enviar um byte, e devolve a URL de PUT unico
+///   2) envio DIRETO ao R2 (nao passa pelo backend nem pelo proxy do Cloudflare,
+///      que corta > 100MB): acima de MULTIPART_MIN em pedacos de 64MB
+///      (put_in_parts); abaixo, um PUT unico (put_one_part com offset 0).
+///      Streaming + Content-Length, mesma politica de tentativas nos dois.
+///   3) /api/app/draft-file-commit -> regista em metadata.files / original_url
+/// Emite progresso por arquivo; o token e' renovado pelo JS a meio (fresh_token).
 pub async fn add_file(
     app: AppHandle,
     token: String,
@@ -576,91 +758,61 @@ pub async fn add_file(
         file.field.strip_prefix("xf_").unwrap_or(&file.field).to_string()
     };
 
-    let err_result = |status: u16, message: String| {
-        Ok(DraftResult { ok: false, status, id: None, message, warnings: vec![] })
-    };
-
-    // FICHEIRO GRANDE: vai em pedacos e salta os passos 1 e 2 abaixo (o
-    // create/sign/complete trata de tudo e devolve o path final).
-    if file_size > MULTIPART_MIN {
-        return match put_in_parts(&app, &client, &token, &file, &fkey, file_size).await {
-            Ok(path) => commit_file(&app, &client, &token, &draft_id, &fkey, &path, &file.filename).await,
-            Err(e) => {
-                progress(&app, "error", e.clone());
-                if e.contains("cancelled") {
-                    return Err(e);
-                }
-                err_result(0, e)
-            }
-        };
+    // Teto do slot ANTES de gastar banda: o servidor tambem mede no fim, mas
+    // descobrir isso depois de 80 min de upload nao ajuda ninguem.
+    if file_size > max_bytes_for(&fkey) {
+        let msg = format!("{}: file too large (max {}).", file.filename, max_label_for(&fkey));
+        progress(&app, "error", msg.clone());
+        return Ok(DraftResult::fail(413, msg));
     }
 
-    // 1) Pede a URL assinada de PUT. Payload minusculo — passa pelo Cloudflare.
-    let url_endpoint = format!("{}/api/app/draft-file-url", APP_BASE_URL);
-    let meta_resp = client
-        .post(&url_endpoint)
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "draft_id": draft_id, "fkey": fkey, "filename": file.filename }))
-        .send()
-        .await
-        .map_err(|e| format!("Falha de rede ao preparar o upload: {}", e))?;
-    let meta_status = meta_resp.status();
-    let meta_body: serde_json::Value = meta_resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
-    if !meta_status.is_success() || !meta_body.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
-        let message = meta_body.get("error").and_then(|e| e.as_str()).map(String::from)
-            .unwrap_or_else(|| status_message(meta_status.as_u16()));
-        return err_result(meta_status.as_u16(), message);
-    }
-    let put_url = meta_body.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-    let path = meta_body.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-    if put_url.is_empty() || path.is_empty() {
-        return err_result(500, "Upload URL missing.".into());
-    }
-
-    // 2) PUT do arquivo DIRETO para o R2. Streaming + Content-Length (o R2 exige-o).
-    //    Retry em falha de rede ou 5xx; um 4xx e deterministico (nao repete).
-    const MAX_ATTEMPTS: u32 = 3;
-    let mut last_err = String::new();
-    let mut put_status = 0u16;
-    let mut put_ok = false;
-    for attempt in 1..=MAX_ATTEMPTS {
-        let (body, total) = progress_body(&app, &file).await?; // stream novo a cada tentativa
-        match client
-            .put(&put_url)
-            .header(reqwest::header::CONTENT_LENGTH, total)
-            .body(body)
-            .send()
-            .await
-        {
-            Ok(r) => {
-                put_status = r.status().as_u16();
-                if r.status().is_success() {
-                    put_ok = true;
-                    break;
-                }
-                last_err = format!("Storage rejected the file (HTTP {}).", put_status);
-                if attempt < MAX_ATTEMPTS && r.status().is_server_error() {
-                    tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
-                } else {
-                    break; // 4xx nao adianta repetir
-                }
-            }
-            Err(e) => {
-                if is_cancelled(&app) {
-                    progress(&app, "error", "Upload cancelled.".into());
-                    return Err("Upload cancelled.".into());
-                }
-                last_err = format!("Falha de rede no upload: {}", e);
-                if attempt < MAX_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
-                }
-            }
+    // 1) draft-file-url — nos DOIS caminhos. O multipart saltava isto e um
+    //    rascunho ja submetido/apagado so era descoberto no commit, com 2GB ja
+    //    juntos no R2 e sem ninguem para os apagar. No caminho em pedacos a URL
+    //    devolvida nao se usa (nao cria objeto nenhum); o que interessa e' a
+    //    validacao do rascunho em <1s.
+    let meta = match post_json(
+        &app,
+        &client,
+        &token,
+        "/api/app/draft-file-url",
+        serde_json::json!({ "draft_id": draft_id, "fkey": fkey, "filename": file.filename }),
+    )
+    .await
+    {
+        Ok(j) => j,
+        Err(e) => {
+            progress(&app, "error", e.message.clone());
+            return Ok(DraftResult::fail(e.status, e.message));
         }
+    };
+    let put_url = field_str(&meta, "url");
+    let single_path = field_str(&meta, "path");
+    if put_url.is_empty() || single_path.is_empty() {
+        return Ok(DraftResult::fail(500, "Upload URL missing.".into()));
     }
-    if !put_ok {
-        progress(&app, "error", last_err.clone());
-        return err_result(put_status, if last_err.is_empty() { "Upload failed.".into() } else { last_err });
-    }
+
+    // 2) Envio direto ao R2.
+    let sent: Result<String, ApiError> = if file_size > MULTIPART_MIN {
+        put_in_parts(&app, &client, &token, &file, &fkey, file_size).await
+    } else {
+        put_one_part(&app, &client, put_url, Resign::None, &token, &file, 0, file_size, file_size)
+            .await
+            .map(|_| single_path)
+    };
+    let path = match sent {
+        Ok(p) => p,
+        Err(e) => {
+            // Cancelamento pelo flag, nao pelo texto da mensagem: o frontend
+            // distingue Err (cancelou) de DraftResult{ok:false} (falhou).
+            if is_cancelled(&app) {
+                progress(&app, "error", "Upload cancelled.".into());
+                return Err("Upload cancelled.".into());
+            }
+            progress(&app, "error", e.message.clone());
+            return Ok(DraftResult::fail(e.status, e.message));
+        }
+    };
 
     // 3) Confirma no site — regista o ficheiro em metadata.files[fkey].
     commit_file(&app, &client, &token, &draft_id, &fkey, &path, &file.filename).await
@@ -669,7 +821,7 @@ pub async fn add_file(
 /// Passo final, comum aos dois caminhos (PUT unico e pedacos): regista o
 /// ficheiro no rascunho. Sem isto o ficheiro fica no R2 sem pertencer a nada.
 async fn commit_file(
-    _app: &AppHandle,
+    app: &AppHandle,
     client: &reqwest::Client,
     token: &str,
     draft_id: &str,
@@ -677,22 +829,20 @@ async fn commit_file(
     path: &str,
     filename: &str,
 ) -> Result<DraftResult, String> {
-    let commit_endpoint = format!("{}/api/app/draft-file-commit", APP_BASE_URL);
-    let commit_resp = client
-        .post(&commit_endpoint)
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "draft_id": draft_id, "fkey": fkey, "path": path, "name": filename }))
-        .send()
-        .await
-        .map_err(|e| format!("Falha de rede ao confirmar o upload: {}", e))?;
-    let commit_status = commit_resp.status();
-    let commit_body: serde_json::Value = commit_resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
-    if commit_status.is_success() && commit_body.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
-        Ok(DraftResult { ok: true, status: commit_status.as_u16(), id: None, message: fkey.to_string(), warnings: vec![] })
-    } else {
-        let message = commit_body.get("error").and_then(|e| e.as_str()).map(String::from)
-            .unwrap_or_else(|| status_message(commit_status.as_u16()));
-        Ok(DraftResult { ok: false, status: commit_status.as_u16(), id: None, message, warnings: vec![] })
+    match post_json(
+        app,
+        client,
+        token,
+        "/api/app/draft-file-commit",
+        serde_json::json!({ "draft_id": draft_id, "fkey": fkey, "path": path, "name": filename }),
+    )
+    .await
+    {
+        Ok(_) => Ok(DraftResult { ok: true, status: 200, id: None, message: fkey.to_string(), warnings: vec![] }),
+        Err(e) => {
+            progress(app, "error", e.message.clone());
+            Ok(DraftResult::fail(e.status, e.message))
+        }
     }
 }
 
@@ -711,33 +861,46 @@ mod csp_vs_essentia {
         std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("nao li {:?}: {}", p, e))
     }
 
+    /// A CSP viva (app.security.csp), lida do JSON e nao por substring do
+    /// ficheiro — um comentario ou uma chave morta com 'unsafe-eval' passava.
+    fn diretiva(nome: &str) -> String {
+        let conf: serde_json::Value = serde_json::from_str(&ler("tauri.conf.json")).expect("tauri.conf.json invalido");
+        let csp = conf["app"]["security"]["csp"].as_str().expect("app.security.csp em falta");
+        csp.split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with(nome) && d[nome.len()..].starts_with(' '))
+            .unwrap_or_else(|| panic!("diretiva {} em falta na CSP", nome))
+            .to_string()
+    }
+
     #[test]
     fn se_o_essentia_usa_new_function_a_csp_tem_de_permitir_eval() {
         let glue = ler("../src/essentia/essentia-wasm.web.js");
         let precisa_eval = glue.contains("new Function") || glue.contains(" eval(");
-        let csp = ler("tauri.conf.json");
-        if precisa_eval {
-            assert!(
-                csp.contains("'unsafe-eval'"),
-                "o glue do Essentia usa new Function, logo a CSP TEM de ter 'unsafe-eval'. \
-                 Com 'wasm-unsafe-eval' apenas, a detecao de BPM/Key morre em silencio."
-            );
-        }
+        // Se um dia o glue deixar de precisar, este assert avisa para tirar o
+        // 'unsafe-eval' — o teste nao pode passar em silencio por um `if`.
+        assert!(precisa_eval, "o glue do Essentia ja nao usa new Function: tirar 'unsafe-eval' da CSP");
+        assert!(
+            diretiva("script-src").contains("'unsafe-eval'"),
+            "o glue do Essentia usa new Function, logo script-src TEM de ter 'unsafe-eval'. \
+             Com 'wasm-unsafe-eval' apenas, a detecao de BPM/Key morre em silencio."
+        );
     }
 
     #[test]
     fn a_csp_continua_a_fechar_o_resto() {
         // Repor o 'unsafe-eval' nao pode servir de desculpa para abrir tudo.
-        let csp = ler("tauri.conf.json");
-        assert!(csp.contains("default-src 'self'"), "a base da CSP tem de continuar 'self'");
-        assert!(!csp.contains("script-src *"), "script-src aberto a tudo");
-        assert!(!csp.contains("connect-src *"), "connect-src aberto a tudo");
+        assert_eq!(diretiva("default-src"), "default-src 'self'", "a base da CSP tem de continuar 'self'");
+        for d in ["script-src", "connect-src"] {
+            let v = diretiva(d);
+            assert!(!v.split(' ').any(|s| s == "*"), "{} aberto a tudo: {}", d, v);
+        }
     }
 }
 
 #[cfg(test)]
 mod part_math {
-    use super::{part_count, part_range, MULTIPART_MIN, PART_SIZE};
+    use super::{max_bytes_for, open_range, part_count, part_range, MULTIPART_MIN, PART_SIZE};
 
     /// Os pedacos tem de LADRILHAR o ficheiro: sem buracos, sem sobreposicao, e
     /// a soma tem de dar o tamanho exato. Um erro aqui nao rebenta — sobe um
@@ -789,17 +952,20 @@ mod part_math {
     }
 
     /// A aritmetica acima diz QUE intervalos enviar; falta provar que o
-    /// seek+take le mesmo esses bytes. Usa intervalos pequenos (o mecanismo e o
-    /// mesmo a 64MB) e reconstroi o ficheiro a partir dos pedacos.
+    /// open_range (o codigo de PRODUCAO, nao uma copia) le mesmo esses bytes.
+    /// Usa o mesmo part_range com um ficheiro pequeno: o mecanismo e' igual a
+    /// 64MB, mas nao ha maneira de ter PART_SIZE pequeno so no teste, por isso
+    /// o ladrilhar e' testado acima e aqui prova-se o seek+take por offset.
     #[tokio::test]
-    async fn seek_e_take_reconstroem_o_ficheiro_byte_a_byte() {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    async fn open_range_reconstroi_o_ficheiro_byte_a_byte() {
+        use tokio::io::AsyncReadExt;
 
         let original: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
         let dir = std::env::temp_dir().join(format!("gpw-part-test-{}", std::process::id()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let caminho = dir.join("amostra.bin");
         tokio::fs::write(&caminho, &original).await.unwrap();
+        let caminho = caminho.to_str().unwrap().to_string();
 
         const PEDACO: u64 = 3_000; // ultimo pedaco fica com 1.000 (resto)
         let total = original.len() as u64;
@@ -807,23 +973,40 @@ mod part_math {
         let mut offset = 0u64;
         while offset < total {
             let len = PEDACO.min(total - offset);
-            let mut f = tokio::fs::File::open(&caminho).await.unwrap();
-            f.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
             let mut buf = Vec::new();
-            f.take(len).read_to_end(&mut buf).await.unwrap();
+            open_range(&caminho, offset, len).await.unwrap().read_to_end(&mut buf).await.unwrap();
             assert_eq!(buf.len() as u64, len, "o take leu alem do pedaco (offset {})", offset);
             reconstruido.extend_from_slice(&buf);
             offset += len;
         }
         assert_eq!(reconstruido, original, "o ficheiro remontado difere do original");
+
+        // Pedir alem do fim nao inventa bytes: devolve so o que existe.
+        let mut buf = Vec::new();
+        open_range(&caminho, total - 10, 1_000).await.unwrap().read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, &original[original.len() - 10..]);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
+    /// O teto de partes que conta e' o do SERVIDOR (maxPartsFor em
+    /// upload-multipart/route.js = ceil(teto do slot / 5MB)), nao os 10.000 do
+    /// S3. Se o PART_SIZE descer, o ficheiro maximo do slot deixa de caber.
     #[test]
-    fn ficheiro_de_2gb_cabe_no_limite_de_10000_pedacos_do_s3() {
-        assert!(part_count(2 * 1024 * 1024 * 1024) <= 10_000);
-        // E o teto de um pedaco respeita o minimo de 5MB do S3/R2 (exceto o ultimo).
-        assert!(PART_SIZE >= 5 * 1024 * 1024);
+    fn ficheiro_no_teto_do_slot_cabe_no_limite_de_partes_do_servidor() {
+        const MIN_PART: u64 = 5 * 1024 * 1024;
+        assert!(PART_SIZE >= MIN_PART, "o R2 recusa pedacos abaixo de 5MB (exceto o ultimo)");
+        for fkey in ["stems", "master", "project"] {
+            let teto = max_bytes_for(fkey);
+            let max_parts_servidor = teto.div_ceil(MIN_PART) as u32;
+            assert!(
+                part_count(teto) <= max_parts_servidor,
+                "{}: {} pedacos > {} que o servidor assina",
+                fkey, part_count(teto), max_parts_servidor
+            );
+        }
+        // Espelho de lib/upload-exts.js: stems 2GB, resto 1GB.
+        assert_eq!(max_bytes_for("stems"), 2 * 1024 * 1024 * 1024);
+        assert_eq!(max_bytes_for("master"), 1024 * 1024 * 1024);
     }
 }
 

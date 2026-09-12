@@ -163,6 +163,14 @@ pub async fn add_draft_file(
 /// Liga/desliga o cancelamento do upload em andamento. O frontend liga no
 /// botao Cancel e desliga ao iniciar um novo envio; o stream em curso aborta
 /// no proximo chunk.
+/// Resposta do JS ao evento `auth:token-needed`, que o Rust emite antes de
+/// cada chamada de controlo de um upload longo (ver uploader::fresh_token).
+/// A sessao Supabase vive no JS — so ele consegue renovar o token.
+#[tauri::command]
+pub fn provide_token(app: AppHandle, token: String) {
+    uploader::provide_token(&app, token)
+}
+
 #[tauri::command]
 pub fn set_upload_cancelled(app: AppHandle, cancelled: bool) {
     use std::sync::atomic::Ordering;
