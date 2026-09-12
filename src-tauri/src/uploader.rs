@@ -73,7 +73,10 @@ struct FileProgress {
 // Em pedacos: cada PUT e pequeno (cabe no timeout com folga) e uma falha
 // reenvia so aquele pedaco. Usa a MESMA rota que o site (validada contra o R2
 // real): /api/tracks/upload-multipart. O servidor nao precisou de mudar nada.
-const MULTIPART_MIN: u64 = 96 * 1024 * 1024; // abaixo disto, PUT unico como antes
+// TODOS os ficheiros vao por aqui, mesmo os pequenos (1 pedaco). Havia um
+// caminho separado de PUT unico abaixo de 96MB: dois caminhos para a mesma
+// coisa, e as correcoes caiam num so (a validacao do rascunho ficou meses
+// so no PUT unico). Um ficheiro pequeno custa 2 pedidos de controlo a mais.
 const PART_SIZE: u64 = 64 * 1024 * 1024; // minimo do S3/R2 e 5MB
 const SIGN_BATCH: u32 = 10; // assinaturas pedidas de cada vez (o servidor aceita ate 50)
 const PART_ATTEMPTS: u32 = 3;
@@ -311,30 +314,26 @@ async fn part_body(
 
 const MP_PATH: &str = "/api/tracks/upload-multipart";
 
-/// Como re-assinar uma parte cuja URL expirou (403/404). So faz sentido no
-/// multipart: uma URL de PUT unico vale 4h e o pedido morre aos 30 min.
-enum Resign<'a> {
-    None,
-    Part { path: &'a str, upload_id: &'a str, part_n: u32 },
-}
-
 fn field_str(v: &serde_json::Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
-/// PUT de UM pedaco (ou do ficheiro inteiro, com offset 0), com tentativas.
-/// Regras — as MESMAS que o site aplica no browser:
+/// PUT de UM pedaco, com tentativas. Regras — as MESMAS que o site aplica no
+/// browser:
 ///  · cancelamento do produtor sai ja, sem repetir;
 ///  · 403/404 e' assinatura expirada (portatil adormeceu a meio) → pede URL NOVA
 ///    para esta parte em vez de repetir a morta;
 ///  · outros 4xx nao mudam com repeticao; rede/5xx/429 repetem com backoff;
 ///  · abrir/posicionar o ficheiro tambem entra no retry — um antivirus ou o
 ///    OneDrive a tocar no ZIP acabado de exportar da um erro transitorio.
-async fn put_one_part(
+#[allow(clippy::too_many_arguments)]
+async fn put_part(
     app: &AppHandle,
     client: &reqwest::Client,
     mut url: String,
-    resign: Resign<'_>,
+    path: &str,
+    upload_id: &str,
+    part_n: u32,
     token: &str,
     file: &UploadFile,
     offset: u64,
@@ -379,30 +378,27 @@ async fn put_one_part(
                 let st = r.status().as_u16();
                 last = ApiError { status: st, message: format!("Storage rejected a chunk (HTTP {}).", st) };
                 match st {
-                    403 | 404 => match &resign {
-                        Resign::Part { path, upload_id, part_n } => {
-                            let j = post_json(
-                                app,
-                                client,
-                                token,
-                                MP_PATH,
-                                serde_json::json!({ "action": "sign", "path": path, "uploadId": upload_id, "parts": [part_n] }),
-                            )
-                            .await?;
-                            let fresh = j
-                                .get("urls")
-                                .and_then(|u| u.as_array())
-                                .and_then(|a| a.first())
-                                .map(|item| field_str(item, "url"))
-                                .unwrap_or_default();
-                            if fresh.is_empty() {
-                                last.message = "Upload em pedacos: assinatura invalida.".into();
-                                return Err(last);
-                            }
-                            url = fresh;
+                    403 | 404 => {
+                        let j = post_json(
+                            app,
+                            client,
+                            token,
+                            MP_PATH,
+                            serde_json::json!({ "action": "sign", "path": path, "uploadId": upload_id, "parts": [part_n] }),
+                        )
+                        .await?;
+                        let fresh = j
+                            .get("urls")
+                            .and_then(|u| u.as_array())
+                            .and_then(|a| a.first())
+                            .map(|item| field_str(item, "url"))
+                            .unwrap_or_default();
+                        if fresh.is_empty() {
+                            last.message = "Upload em pedacos: assinatura invalida.".into();
+                            return Err(last);
                         }
-                        Resign::None => return Err(last),
-                    },
+                        url = fresh;
+                    }
                     429 => {}
                     400..=499 => return Err(last),
                     _ => {}
@@ -467,18 +463,7 @@ async fn put_all_parts(
             }
             let (offset, len) = part_range(part_n, total)
                 .ok_or_else(|| ApiError { status: 500, message: "Upload em pedacos: pedaco fora do ficheiro.".into() })?;
-            put_one_part(
-                app,
-                client,
-                url,
-                Resign::Part { path, upload_id, part_n },
-                token,
-                file,
-                offset,
-                len,
-                total,
-            )
-            .await?;
+            put_part(app, client, url, path, upload_id, part_n, token, file, offset, len, total).await?;
         }
     }
     Ok(())
@@ -725,12 +710,12 @@ impl DraftResult {
 
 /// Anexa UM arquivo a um rascunho por UPLOAD DIRETO ao R2 (3 passos):
 ///   1) /api/app/draft-file-url  -> valida rascunho (dono/estado) e slot em <1s,
-///      ANTES de enviar um byte, e devolve a URL de PUT unico
+///      ANTES de enviar um byte
 ///   2) envio DIRETO ao R2 (nao passa pelo backend nem pelo proxy do Cloudflare,
-///      que corta > 100MB): acima de MULTIPART_MIN em pedacos de 64MB
-///      (put_in_parts); abaixo, um PUT unico (put_one_part com offset 0).
-///      Streaming + Content-Length, mesma politica de tentativas nos dois.
+///      que corta > 100MB), sempre em pedacos de 64MB (put_in_parts), com
+///      streaming + Content-Length.
 ///   3) /api/app/draft-file-commit -> regista em metadata.files / original_url
+///
 /// Emite progresso por arquivo; o token e' renovado pelo JS a meio (fresh_token).
 pub async fn add_file(
     app: AppHandle,
@@ -766,12 +751,10 @@ pub async fn add_file(
         return Ok(DraftResult::fail(413, msg));
     }
 
-    // 1) draft-file-url — nos DOIS caminhos. O multipart saltava isto e um
-    //    rascunho ja submetido/apagado so era descoberto no commit, com 2GB ja
-    //    juntos no R2 e sem ninguem para os apagar. No caminho em pedacos a URL
-    //    devolvida nao se usa (nao cria objeto nenhum); o que interessa e' a
-    //    validacao do rascunho em <1s.
-    let meta = match post_json(
+    // 1) draft-file-url — so para VALIDAR o rascunho (dono/estado) e o slot em
+    //    <1s, antes de gastar banda. A URL de PUT que devolve nao se usa (nao
+    //    cria objeto nenhum): o envio e' sempre em pedacos.
+    if let Err(e) = post_json(
         &app,
         &client,
         &token,
@@ -780,27 +763,12 @@ pub async fn add_file(
     )
     .await
     {
-        Ok(j) => j,
-        Err(e) => {
-            progress(&app, "error", e.message.clone());
-            return Ok(DraftResult::fail(e.status, e.message));
-        }
-    };
-    let put_url = field_str(&meta, "url");
-    let single_path = field_str(&meta, "path");
-    if put_url.is_empty() || single_path.is_empty() {
-        return Ok(DraftResult::fail(500, "Upload URL missing.".into()));
+        progress(&app, "error", e.message.clone());
+        return Ok(DraftResult::fail(e.status, e.message));
     }
 
-    // 2) Envio direto ao R2.
-    let sent: Result<String, ApiError> = if file_size > MULTIPART_MIN {
-        put_in_parts(&app, &client, &token, &file, &fkey, file_size).await
-    } else {
-        put_one_part(&app, &client, put_url, Resign::None, &token, &file, 0, file_size, file_size)
-            .await
-            .map(|_| single_path)
-    };
-    let path = match sent {
+    // 2) Envio direto ao R2, em pedacos (um so caminho, do cover ao ZIP de 2GB).
+    let path = match put_in_parts(&app, &client, &token, &file, &fkey, file_size).await {
         Ok(p) => p,
         Err(e) => {
             // Cancelamento pelo flag, nao pelo texto da mensagem: o frontend
@@ -846,12 +814,13 @@ async fn commit_file(
     }
 }
 
-/// A CSP do webview e o glue do Essentia estao amarrados um ao outro: o
-/// Emscripten/embind usa `new Function(...)`, que exige 'unsafe-eval'. Trocar
-/// por 'wasm-unsafe-eval' (que so cobre WebAssembly) mata a detecao de BPM/Key
-/// em silencio — o app mostra "Could not auto-detect" e ninguem liga a causa a
-/// CSP. Aconteceu: a troca foi feita num hardening, ficou meses por lancar, e
-/// so estourou quando saiu na build 3.11.0.
+/// A CSP do webview e o Essentia estao amarrados um ao outro: o Emscripten/
+/// embind usa `new Function(...)`, que exige 'unsafe-eval'. Enquanto o motor
+/// corria NA PAGINA, tirar o 'unsafe-eval' matava a detecao de BPM/Key em
+/// silencio — o app mostrava "Could not auto-detect" e ninguem ligava a causa
+/// a CSP (aconteceu na build 3.11.0). A saida foi a mesma do site: o motor
+/// corre num worker, que nao recebe CSP (o Tauri so poe o header nas respostas
+/// .html), e a pagina fecha o eval. Estes testes prendem as tres pecas juntas.
 #[cfg(test)]
 mod csp_vs_essentia {
     use std::path::PathBuf;
@@ -873,17 +842,44 @@ mod csp_vs_essentia {
             .to_string()
     }
 
+    /// Um token exato da diretiva (nao substring: 'wasm-unsafe-eval' CONTEM
+    /// 'unsafe-eval' e passaria a verificacao por substring).
+    fn tem_token(diretiva_nome: &str, token: &str) -> bool {
+        diretiva(diretiva_nome).split_whitespace().any(|t| t == token)
+    }
+
     #[test]
-    fn se_o_essentia_usa_new_function_a_csp_tem_de_permitir_eval() {
+    fn o_essentia_corre_no_worker_e_a_pagina_fecha_o_eval() {
         let glue = ler("../src/essentia/essentia-wasm.web.js");
-        let precisa_eval = glue.contains("new Function") || glue.contains(" eval(");
-        // Se um dia o glue deixar de precisar, este assert avisa para tirar o
-        // 'unsafe-eval' — o teste nao pode passar em silencio por um `if`.
-        assert!(precisa_eval, "o glue do Essentia ja nao usa new Function: tirar 'unsafe-eval' da CSP");
         assert!(
-            diretiva("script-src").contains("'unsafe-eval'"),
-            "o glue do Essentia usa new Function, logo script-src TEM de ter 'unsafe-eval'. \
-             Com 'wasm-unsafe-eval' apenas, a detecao de BPM/Key morre em silencio."
+            glue.contains("new Function") || glue.contains(" eval("),
+            "o glue do Essentia ja nao usa new Function — este arranjo todo deixou de ser preciso"
+        );
+
+        // 1) A pagina nao carrega o motor: se carregasse, precisava de eval.
+        let html = ler("../src/index.html");
+        for script in ["essentia-wasm.web.js", "essentia.js-core.js"] {
+            assert!(
+                !html.contains(&format!("src=\"/essentia/{}\"", script)),
+                "{} carregado na pagina: volta a precisar de 'unsafe-eval'",
+                script
+            );
+        }
+
+        // 2) O motor corre no worker (que nao recebe CSP nenhuma).
+        let worker = ler("../src/essentia/gpw-essentia-worker.js");
+        assert!(worker.contains("importScripts"), "o worker tem de carregar o glue com importScripts");
+        assert!(worker.contains("essentia-wasm.web.js"), "o worker nao importa o glue do Essentia");
+        assert!(
+            ler("../src/essentia/gpw-analyzer.js").contains("gpw-essentia-worker.js"),
+            "o analyzer tem de arrancar o worker"
+        );
+
+        // 3) E por isso a CSP da pagina pode ficar fechada ao eval.
+        assert!(
+            !tem_token("script-src", "'unsafe-eval'"),
+            "script-src com 'unsafe-eval': se foi reposto, o motor voltou para a pagina — \
+             passa-o para o worker em vez de abrir a CSP"
         );
     }
 
@@ -900,7 +896,7 @@ mod csp_vs_essentia {
 
 #[cfg(test)]
 mod part_math {
-    use super::{max_bytes_for, open_range, part_count, part_range, MULTIPART_MIN, PART_SIZE};
+    use super::{max_bytes_for, open_range, part_count, part_range, PART_SIZE};
 
     /// Os pedacos tem de LADRILHAR o ficheiro: sem buracos, sem sobreposicao, e
     /// a soma tem de dar o tamanho exato. Um erro aqui nao rebenta — sobe um
@@ -926,7 +922,8 @@ mod part_math {
     #[test]
     fn pedacos_ladrilham_o_ficheiro() {
         for total in [
-            MULTIPART_MIN + 1,        // o mais pequeno que vai por pedacos
+            1,                        // ficheiro minusculo: 1 pedaco so
+            5 * 1024 * 1024,          // o minimo de um pedaco do S3 (aqui e' o ultimo)
             PART_SIZE,                // exatamente 1 pedaco
             PART_SIZE + 1,            // 2 pedacos, o 2o com 1 byte
             PART_SIZE * 2,            // exato, sem resto

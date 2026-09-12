@@ -1,7 +1,11 @@
 // ============================================================
 //  GPW AUDIO ANALYZER — deteção de BPM e Key (Essentia.js)
-//  Requer os globais EssentiaWASM + Essentia (essentia.js .web.js
-//  + .js-core.js carregados antes deste script).
+//
+//  A página NÃO carrega o Essentia: o motor corre em gpw-essentia-worker.js
+//  (o glue emscripten usa `new Function`, que a CSP do app já não permite).
+//  Aqui fica só o que precisa do Web Audio — decodificar para PCM mono 44.1k,
+//  que não existe dentro de um worker — e a tradução para Camelot.
+//
 //  Uso:  const r = await GPW_analyzeAudio(file)
 //        → { bpm, key, scale, keyName, camelot }
 // ============================================================
@@ -15,18 +19,40 @@
     'Bb minor': '3A', 'A# minor': '3A', 'F minor': '4A', 'C minor': '5A', 'G minor': '6A', 'D minor': '7A'
   }
 
-  let _essentia = null
-  async function getEssentia() {
-    if (_essentia) return _essentia
-    if (typeof Essentia === 'undefined' || typeof EssentiaWASM === 'undefined') {
-      throw new Error('Analysis engine failed to load.')
+  // Um worker só, reaproveitado: arrancar custa carregar ~2MB de WASM.
+  let _worker = null
+  let _seq = 0
+  const _pending = new Map()
+
+  function getWorker() {
+    if (_worker) return _worker
+    _worker = new Worker('/essentia/gpw-essentia-worker.js')
+    _worker.onmessage = (e) => {
+      const p = _pending.get(e.data.id)
+      if (!p) return
+      _pending.delete(e.data.id)
+      if (e.data.error) p.reject(new Error(e.data.error))
+      else p.resolve(e.data)
     }
-    let wasm = EssentiaWASM
-    if (typeof wasm === 'function') { wasm = await wasm() }
-    else if (wasm && typeof wasm.EssentiaWASM === 'function') { wasm = await wasm.EssentiaWASM() }
-    else if (wasm && wasm.EssentiaWASM) { wasm = wasm.EssentiaWASM }
-    _essentia = new Essentia(wasm)
-    return _essentia
+    // Falha a carregar o worker (ou morte a meio): ninguém responde às
+    // promessas pendentes, ficariam para sempre em "Analyzing…".
+    _worker.onerror = (e) => {
+      const err = new Error(e.message || 'Analysis engine failed to load.')
+      for (const p of _pending.values()) p.reject(err)
+      _pending.clear()
+      try { _worker.terminate() } catch (x) {}
+      _worker = null
+    }
+    return _worker
+  }
+
+  function analyzeInWorker(pcm) {
+    const id = ++_seq
+    return new Promise((resolve, reject) => {
+      _pending.set(id, { resolve, reject })
+      // pcm.buffer transferido (é uma cópia nossa): evita clonar ~16MB.
+      getWorker().postMessage({ id, pcm }, [pcm.buffer])
+    })
   }
 
   async function decodeToMono44k(arrayBuffer) {
@@ -45,32 +71,21 @@
 
   async function GPW_analyzeAudio(file) {
     const arrayBuffer = await file.arrayBuffer()
-    let data = await decodeToMono44k(arrayBuffer)
+    const data = await decodeToMono44k(arrayBuffer)
     const MAX = 44100 * 90 // cap a 90s por performance
-    if (data.length > MAX) data = data.slice(0, MAX)
+    // slice SEMPRE: o buffer vai ser transferido para o worker, e o original é
+    // uma vista sobre o AudioBuffer que ainda está vivo aqui.
+    const pcm = data.slice(0, Math.min(data.length, MAX))
 
-    const essentia = await getEssentia()
-    const vec = essentia.arrayToVector(data)
-
-    // BPM — PercivalBpmEstimator (melhor para batidas estáveis de EDM)
-    let bpmRaw = 0
-    try {
-      const perc = essentia.PercivalBpmEstimator(vec, 1024, 2048, 128, 128, 210, 50, 44100)
-      bpmRaw = perc.bpm || 0
-    } catch (e) { /* fallback abaixo */ }
-    if (!bpmRaw || bpmRaw < 40) {
-      try { const rhythm = essentia.RhythmExtractor2013(vec, 208, 'multifeature', 40); bpmRaw = rhythm.bpm || 0 } catch (e) {}
+    const r = await analyzeInWorker(pcm)
+    const keyName = `${r.key} ${r.scale}`
+    return {
+      bpm: r.bpm,          // EDM usa BPM inteiros (arredondado no worker)
+      key: r.key,
+      scale: r.scale,
+      keyName,
+      camelot: KEY_TO_CAMELOT[keyName] || ''
     }
-    const bpm = Math.round(bpmRaw) // EDM usa BPM inteiros
-
-    const keyRes = essentia.KeyExtractor(vec)
-    const key = keyRes.key
-    const scale = keyRes.scale
-    const keyName = `${key} ${scale}`
-    const camelot = KEY_TO_CAMELOT[keyName] || ''
-
-    try { vec.delete() } catch (e) {}
-    return { bpm, key, scale, keyName, camelot }
   }
 
   window.GPW_analyzeAudio = GPW_analyzeAudio
