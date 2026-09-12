@@ -85,7 +85,7 @@
           <div class="review__col">
             <div class="field"><label class="field__label">Plugins</label><input id="def-plugins" class="input" type="text" placeholder="Serum, Diva, FabFilter" /></div>
             <div class="field"><label class="field__label">Hardware</label><input id="def-hardware" class="input" type="text" placeholder="(optional)" /></div>
-            <div class="field"><label class="field__label">Default price (EUR)</label><input id="def-price" class="input" type="number" min="200" step="10" placeholder="300" /></div>
+            <div class="field"><label class="field__label">Default price (USD)</label><input id="def-price" class="input" type="number" min="100" max="2000" step="50" placeholder="300" /></div>
             <div class="field">
               <label class="field__label">Default genre</label>
               <select id="def-genre" class="input"></select>
@@ -109,7 +109,7 @@
               </label>
             </div>
             <div class="field">
-              <label class="field__label">Customization price (EUR)</label>
+              <label class="field__label">Customization price (USD)</label>
               <select id="def-customize-price" class="input">
                 <option value="50">50</option>
                 <option value="100">100</option>
@@ -225,9 +225,10 @@
       </section>
     </main>
 
-    <!-- ESSENTIA.JS (BPM/Key detection) — reaproveitado do GPW, offline -->
-    <script src="/essentia/essentia-wasm.web.js"></script>
-    <script src="/essentia/essentia.js-core.js"></script>
+    <!-- ESSENTIA.JS (BPM/Key detection) — reaproveitado do GPW, offline.
+         O motor NÃO é carregado aqui: corre em gpw-essentia-worker.js, que o
+         analyzer arranca. O glue do Essentia usa `new Function` e a CSP desta
+         página já não permite eval — dentro de um worker não há CSP. -->
     <script src="/essentia/gpw-analyzer.js"></script>
 
     <footer class="footer">

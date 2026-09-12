@@ -96,10 +96,12 @@ async function refresh(refreshToken) {
 /// sessao.
 let _refreshing = null;
 
-export async function getValidToken() {
+export async function getValidToken({ minRemaining = 60 } = {}) {
   if (!_session?.accessToken) throw new Error("Not logged in.");
   const now = Math.floor(Date.now() / 1000);
-  const needsRefresh = !_session.expiresAt || _session.expiresAt - now < 60;
+  // minRemaining: quem vai usar o token numa operacao longa (upload) pede uma
+  // margem maior para nao apanhar um token que expira a meio.
+  const needsRefresh = !_session.expiresAt || _session.expiresAt - now < minRemaining;
   if (needsRefresh) {
     if (!_session.refreshToken) throw new Error("Session expired. Log in again.");
     if (!_refreshing) {

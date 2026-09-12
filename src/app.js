@@ -819,6 +819,14 @@ window.addEventListener("DOMContentLoaded", async () => {
   listen("convert:progress", (e) => onConvProgress(e.payload));
   listen("upload:progress", (e) => onUploadProgress(e.payload));
   listen("upload:file-progress", (e) => onFileProgress(e.payload));
+  // O Rust pede um token fresco antes de cada chamada de controlo do upload
+  // (um upload de 2GB pode durar mais do que a validade do access_token).
+  listen("auth:token-needed", async () => {
+    let token = "";
+    try { token = await getValidToken({ minRemaining: 15 * 60 }); }
+    catch (err) { console.warn("token refresh failed:", err); }
+    try { await invoke("provide_token", { token }); } catch {}
+  });
 
   // Sessao persistida -> renova o token (fica sempre logado) e entra direto.
   state.session = await loadSession();
