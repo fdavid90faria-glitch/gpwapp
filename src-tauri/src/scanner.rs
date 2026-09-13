@@ -163,6 +163,15 @@ fn ext_of(name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Lixo que o Mac mete nos ZIPs: a pasta `__MACOSX/` com um "._Nome.wav" por
+/// cada ficheiro (AppleDouble — metadados do Finder, nao audio). Lido como
+/// stem, o QC dava "no RIFF tag found" em cada um. Espelho do GPW ANALYZER
+/// (scanner::is_mac_junk, PR #5), onde reprovou 4 tracks em 2026-09.
+fn is_mac_junk(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(|c| c.eq_ignore_ascii_case("__MACOSX") || c.starts_with("._"))
+}
+
 /// Percorre a pasta recursivamente (profundidade limitada) coletando arquivos.
 fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>) {
     if depth > 5 {
@@ -262,7 +271,7 @@ fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
             Err(_) => continue,
         };
         let ename = entry.name().to_string();
-        if !ename.to_lowercase().ends_with(".wav") {
+        if !ename.to_lowercase().ends_with(".wav") || is_mac_junk(&ename) {
             continue;
         }
         let base = ename.rsplit(['/', '\\']).next().unwrap_or(&ename).to_string();
@@ -416,5 +425,24 @@ mod tests {
         // (2+ arquivos no mesmo campo) sao tratados na UI (dedupe + aviso).
         assert_eq!(cat("Track (Club Mix).wav"), "extended_mix");
         assert_eq!(cat("Track Remix.wav"), "extended_mix");
+    }
+
+    #[test]
+    fn zip_de_stems_feito_no_mac_ignora_os_appledouble() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("gpw_uploader_macjunk_test");
+        fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("Stems.zip");
+        let mut zw = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("Stems/Kick.wav", opts).unwrap();
+        zw.write_all(b"fake wav").unwrap();
+        zw.start_file("__MACOSX/Stems/._Kick.wav", opts).unwrap();
+        zw.write_all(b"appledouble").unwrap();
+        zw.finish().unwrap();
+
+        let wavs = extract_wavs_from_zip(&zip_path.to_string_lossy()).unwrap();
+        assert_eq!(wavs.len(), 1);
+        assert!(wavs[0].ends_with("Kick.wav") && !wavs[0].contains("._"));
     }
 }
