@@ -620,8 +620,10 @@ async fn prepare(app: &AppHandle, files: &[UploadFile]) -> Result<reqwest::Clien
         .map_err(|e| format!("Falha ao criar cliente HTTP: {}", e))
 }
 
-/// Envia o multipart com retry em falhas de rede (ate 3x, backoff). Erros HTTP
-/// (400/401/409...) NAO sao repetidos — sao deterministicos.
+/// Envia o multipart com retry em falhas de rede E em 5xx (ate 3x, backoff).
+/// O 5xx e' o Supabase a engasgar (504 aos 5s, ~0.7% dos pedidos no plano
+/// Free): em 2026-09-13 um rascunho falhou assim e so passou no Retry manual.
+/// Erros 4xx (400/401/409...) NAO sao repetidos — sao deterministicos.
 async fn post_with_retry(
     app: &AppHandle,
     client: &reqwest::Client,
@@ -634,11 +636,17 @@ async fn post_with_retry(
         let label = if attempt == 1 {
             "Uploading to Ghost Producer World…".to_string()
         } else {
-            format!("Network issue — retrying ({}/{})…", attempt, MAX_ATTEMPTS)
+            format!("Temporary issue — retrying ({}/{})…", attempt, MAX_ATTEMPTS)
         };
         progress(app, "uploading", label);
 
         match send_once(app, client, url, payload).await {
+            // ponytail: se o servidor gravou o rascunho e so a resposta se perdeu,
+            // repetir cria um 2.o rascunho vazio — o mesmo que o botao Retry ja
+            // fazia a mao. Chave de idempotencia no draft-create se isso aparecer.
+            // Na ultima tentativa o 5xx segue para o create_draft, que mostra a
+            // mensagem do servidor.
+            Ok(r) if r.status().is_server_error() && attempt < MAX_ATTEMPTS => {}
             Ok(r) => return Ok(r),
             Err(e) => {
                 if is_cancelled(app) {
@@ -646,10 +654,10 @@ async fn post_with_retry(
                     return Err("Upload cancelled.".into());
                 }
                 last_err = e;
-                if attempt < MAX_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
-                }
             }
+        }
+        if attempt < MAX_ATTEMPTS {
+            tokio::time::sleep(backoff(attempt)).await;
         }
     }
     progress(app, "error", last_err.clone());
