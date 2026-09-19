@@ -57,7 +57,13 @@ const UNDEFINED: Classification = Classification {
 fn classify_wav(name_lower: &str) -> Classification {
     let radio = name_lower.contains("radio");
     let instrumental = name_lower.contains("instrumental");
-    let mixdown = name_lower.contains("mixdown");
+    // "Unmastered" e sinonimo de mixdown — e a palavra que a copy do site usa
+    // ("the unmastered mixdown"), por isso e a que muitos produtores poem no
+    // nome. Como "unmastered" CONTEM "master", sem isto um
+    // "...-extended-unmastered.wav" caia no slot do Extended Mix MASTER (o
+    // campo `file`): o mixdown era enviado como se fosse o master. O mixdown e
+    // sempre testado antes do master_kw nos dois ramos, por isso basta aqui.
+    let mixdown = name_lower.contains("mixdown") || name_lower.contains("unmaster");
     // "mixdown" tambem contem "mix", por isso o mixdown e checado antes.
     let master_kw = name_lower.contains("master") || name_lower.contains("mix");
 
@@ -357,6 +363,26 @@ mod tests {
         // "Master" tambem conta como mix master.
         assert_eq!(cat("Track Master.wav"), "extended_mix");
         assert_eq!(cat("Track Radio Master.wav"), "radio_mix");
+    }
+
+    #[test]
+    fn unmastered_vai_para_o_slot_do_mixdown() {
+        // Nomes reais de uma track de 2026-09 (o produtor escreveu "unmastered"
+        // em vez de "mixdown"). Como "unmastered" contem "master", antes desta
+        // regra o mixdown Extended era carregado no campo `file` — o slot do
+        // MASTER — e o comprador levava o ficheiro errado.
+        assert_eq!(cat("quiet-rise-125-Cm-deep-house-extended-unmastered.wav"), "extended_mixdown");
+        assert_eq!(cat("quiet-rise-125-Cm-deep-house-extended-instrumental-unmastered.wav"), "extended_instrumental_mixdown");
+        assert_eq!(cat("quiet-rise-125-Cm-deep-house-radio-unmastered.wav"), "radio_mixdown");
+        assert_eq!(cat("quiet-rise-125-Cm-deep-house-radio-instrumental-unmastered.wav"), "radio_instrumental_mixdown");
+
+        let n = "track - extended unmastered.wav".to_string();
+        let c = classify(&n, "wav", false);
+        assert_eq!(c.upload_field, Some("xf_extended_mixdown"));
+        assert!(!c.is_master, "um unmastered nunca pode ser marcado como master");
+
+        // O master de verdade continua a ir para o campo `file`.
+        assert_eq!(cat("Track - Extended Master.wav"), "extended_mix");
     }
 
     #[test]
