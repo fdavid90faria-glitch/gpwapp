@@ -37,13 +37,39 @@ pub struct ScanResult {
     pub has_extended_master: bool,
 }
 
-struct Classification {
+#[derive(Serialize, Clone)]
+pub struct Classification {
     category: &'static str,
     label: &'static str,
     role: &'static str,
     upload_field: Option<&'static str>,
     is_master: bool,
 }
+
+/// Os slots de WAV que o produtor pode escolher A MAO na UI quando o app
+/// adivinha mal pelo nome. A deteccao por nomenclatura e um palpite; o slot e o
+/// que o comprador recebe, por isso tem de haver forma de o corrigir antes de
+/// enviar.
+///
+/// Materializa o que classify_wav() produz — `slots_batem_com_classify_wav`
+/// trava se as duas listas divergirem, para a UI nunca oferecer um slot que o
+/// scanner nao conhece (ou esquecer um que ele conhece).
+pub const WAV_SLOTS: &[Classification] = &[
+    Classification { category: "extended_mix", label: "Extended Mix (master)", role: "master", upload_field: Some("file"), is_master: true },
+    Classification { category: "extended_mixdown", label: "Extended Mixdown", role: "mixdown", upload_field: Some("xf_extended_mixdown"), is_master: false },
+    Classification { category: "extended_instrumental", label: "Extended Instrumental", role: "instrumental", upload_field: Some("xf_extended_instrumental"), is_master: false },
+    Classification { category: "extended_instrumental_mixdown", label: "Extended Instrumental Mixdown", role: "mixdown", upload_field: Some("xf_extended_instrumental_mixdown"), is_master: false },
+    Classification { category: "radio_mix", label: "Radio Mix (master)", role: "master", upload_field: Some("xf_radio_mix"), is_master: true },
+    Classification { category: "radio_mixdown", label: "Radio Mixdown", role: "mixdown", upload_field: Some("xf_radio_mixdown"), is_master: false },
+    Classification { category: "radio_instrumental", label: "Radio Instrumental Master", role: "instrumental", upload_field: Some("xf_radio_instrumental"), is_master: false },
+    Classification { category: "radio_instrumental_mixdown", label: "Radio Instrumental Mixdown", role: "mixdown", upload_field: Some("xf_radio_instrumental_mixdown"), is_master: false },
+    // "nao enviar": para tirar do upload um WAV que nao pertence ao pack.
+    // Categoria PROPRIA, nunca "undefined": "o app nao sabe o que isto e" e
+    // "o produtor decidiu nao enviar" sao coisas diferentes, e na UI a segunda
+    // nao pode aparecer como se ja tivesse sido decidida. classify_wav nunca
+    // produz esta categoria — so a escolha manual.
+    Classification { category: "not_uploaded", label: "Don't upload", role: "skip", upload_field: None, is_master: false },
+];
 
 const UNDEFINED: Classification = Classification {
     category: "undefined",
@@ -363,6 +389,48 @@ mod tests {
         // "Master" tambem conta como mix master.
         assert_eq!(cat("Track Master.wav"), "extended_mix");
         assert_eq!(cat("Track Radio Master.wav"), "radio_mix");
+    }
+
+    #[test]
+    fn slots_batem_com_classify_wav() {
+        // Nome canonico de cada slot -> a mesma classificacao que a UI oferece.
+        // Se classify_wav mudar de label/role/upload_field e WAV_SLOTS ficar
+        // para tras, o produtor escolhia um slot a mao e o ficheiro ia para
+        // outro sitio. Aqui isso parte.
+        let canonico = [
+            ("track - extended mix.wav", "extended_mix"),
+            ("track - extended mixdown.wav", "extended_mixdown"),
+            ("track - extended instrumental.wav", "extended_instrumental"),
+            ("track - extended instrumental mixdown.wav", "extended_instrumental_mixdown"),
+            ("track - radio mix.wav", "radio_mix"),
+            ("track - radio mixdown.wav", "radio_mixdown"),
+            ("track - radio instrumental.wav", "radio_instrumental"),
+            ("track - radio instrumental mixdown.wav", "radio_instrumental_mixdown"),
+        ];
+        for (nome, cat) in canonico {
+            let c = classify_wav(nome);
+            assert_eq!(c.category, cat, "{}", nome);
+            let slot = WAV_SLOTS
+                .iter()
+                .find(|s| s.category == cat)
+                .unwrap_or_else(|| panic!("WAV_SLOTS nao tem {}", cat));
+            assert_eq!(slot.label, c.label, "label de {}", cat);
+            assert_eq!(slot.role, c.role, "role de {}", cat);
+            assert_eq!(slot.upload_field, c.upload_field, "upload_field de {}", cat);
+            assert_eq!(slot.is_master, c.is_master, "is_master de {}", cat);
+        }
+        // e nenhum slot da UI existe sem o scanner o saber produzir
+        let cats: Vec<&str> = canonico.iter().map(|(_, c)| *c).collect();
+        for s in WAV_SLOTS.iter().filter(|s| s.category != "not_uploaded") {
+            assert!(cats.contains(&s.category), "slot {} nao sai de classify_wav", s.category);
+        }
+        // "Don't upload" nao envia nada e e SO escolha manual: se o scanner
+        // passasse a produzi-la, um ficheiro por identificar aparecia na UI
+        // como se o produtor ja tivesse decidido nao o enviar.
+        let none = WAV_SLOTS.iter().find(|s| s.category == "not_uploaded").unwrap();
+        assert_eq!(none.upload_field, None);
+        assert_ne!(classify_wav("qualquer coisa.wav").category, "not_uploaded");
+        assert_eq!(classify_wav("qualquer coisa.wav").category, "undefined");
     }
 
     #[test]

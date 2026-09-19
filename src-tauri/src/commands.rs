@@ -39,6 +39,15 @@ pub fn scan_folder(folder: String) -> Result<ScanResult, String> {
     scanner::scan(&folder)
 }
 
+/// Os slots de WAV que a UI oferece para o produtor corrigir A MAO quando a
+/// deteccao pelo nome erra. Vem do Rust (scanner::WAV_SLOTS), nao escritos no
+/// JS: tem de ser a MESMA lista que classify_wav produz, senao a correcao
+/// manual mandava o ficheiro para um slot que o resto do app nao reconhece.
+#[tauri::command]
+pub fn wav_slots() -> Vec<scanner::Classification> {
+    scanner::WAV_SLOTS.to_vec()
+}
+
 /// Le um arquivo do disco e devolve os bytes brutos (vira ArrayBuffer no JS).
 /// Usado pela analise de BPM/Key (Fase 3) para alimentar o Essentia sem ter
 /// um objeto File. Resposta binaria eficiente via tauri::ipc::Response.

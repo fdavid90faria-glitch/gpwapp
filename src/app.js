@@ -33,6 +33,7 @@ const state = {
   profile: null,
   defaults: loadDefaults(),
   scan: null,
+  wavSlots: [], // slots que o produtor pode escolher a mao (vem do Rust)
   analysis: null,
   converted: [],
   convRows: {},
@@ -464,6 +465,51 @@ async function convertMasters(scan, run) {
   }
 }
 
+// Tudo o que depende da classificacao dos arquivos: lista, avisos, BPM/key do
+// master, MP3s e QC. Sai do handleDrop para poder correr OUTRA VEZ quando o
+// produtor corrige um slot a mao — mudar o slot muda qual e o master, logo o
+// BPM e os MP3s tem de ser refeitos, senao ficavam os do arquivo errado.
+function applyScan(result, run) {
+  renderScan(result, els, state.wavSlots, onSlotChange);
+
+  // O "Continue" fica desabilitado ate a conversao MP3 terminar
+  // (convertMasters libera no fim) — garante que os MP3s entrem no upload.
+  const master = result.files.find((f) => f.category === "extended_mix");
+  if (master) analyzeMaster(master, run);
+  convertMasters(result, run);
+  runQc(result, () => run === scanRun, els.resultsWarnings).catch((e) =>
+    console.error("QC falhou:", e)
+  );
+}
+
+// O produtor escolheu outro slot para um arquivo no dropdown da lista.
+// Reescreve a classificacao com a do slot (que veio do Rust, igual a que o
+// scanner produz) e refaz a rodada inteira.
+function onSlotChange(file, category) {
+  const slot = state.wavSlots.find((s) => s.category === category);
+  if (!slot || !state.scan || state.uploading) return;
+  const target = state.scan.files.find((f) => f.path === file.path);
+  if (!target) return;
+
+  // Um slot so pode ter um arquivo: o que la estava passa a "Don't upload",
+  // senao o buildUploadFiles ficava com o primeiro da ordem do scan e a
+  // escolha do produtor era ignorada em silencio.
+  if (slot.upload_field) {
+    const none = state.wavSlots.find((s) => s.category === "undefined");
+    for (const f of state.scan.files) {
+      if (f !== target && f.upload_field === slot.upload_field) Object.assign(f, none);
+    }
+  }
+  Object.assign(target, slot);
+
+  const has = (cat) => state.scan.files.some((f) => f.category === cat);
+  state.scan.has_extended_master = has("extended_mix");
+  state.scan.has_radio_master = has("radio_mix");
+  state.scan.undefined_count = state.scan.files.filter((f) => f.category === "undefined").length;
+
+  applyScan(state.scan, ++scanRun);
+}
+
 // ---- Scan (Fase 2) ---------------------------------------------------------
 async function handleDrop(paths) {
   if (!paths || paths.length === 0) return;
@@ -494,17 +540,8 @@ async function handleDrop(paths) {
     const result = await invoke("scan_folder", { folder });
     if (run !== scanRun) return;
     state.scan = result;
-    renderScan(result, els);
     saveLastFolder(result.folder); // pode ser a pasta pai, se um arquivo foi arrastado
-
-    // O "Continue" fica desabilitado ate a conversao MP3 terminar
-    // (convertMasters libera no fim) — garante que os MP3s entrem no upload.
-    const master = result.files.find((f) => f.category === "extended_mix");
-    if (master) analyzeMaster(master, run);
-    convertMasters(result, run);
-    runQc(result, () => run === scanRun, els.resultsWarnings).catch((e) =>
-      console.error("QC falhou:", e)
-    );
+    applyScan(result, run);
   } catch (err) {
     if (run !== scanRun) return;
     els.resultsSummary.innerHTML = "";
@@ -815,6 +852,11 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   healthcheck();
   checkForUpdates();
+  // Slots do dropdown de correcao. Se falhar, a lista sai sem dropdown (o app
+  // continua a classificar pelo nome, como antes) em vez de nao abrir.
+  invoke("wav_slots")
+    .then((s) => { state.wavSlots = s || []; })
+    .catch((e) => console.error("wav_slots falhou:", e));
   wireDragDrop();
   listen("convert:progress", (e) => onConvProgress(e.payload));
   listen("upload:progress", (e) => onUploadProgress(e.payload));

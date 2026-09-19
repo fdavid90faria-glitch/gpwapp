@@ -29,6 +29,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ping,
             commands::scan_folder,
+            commands::wav_slots,
             commands::read_file_bytes,
             commands::qc_analyze,
             commands::qc_stems_sum,

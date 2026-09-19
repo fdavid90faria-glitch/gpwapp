@@ -179,7 +179,41 @@ function renderWarnings(result, container) {
   }
 }
 
-function renderList(result, list) {
+// WAV solto (fora de uma pasta de stems) e o unico caso em que a deteccao pelo
+// nome decide algo que o produtor pode querer corrigir: master vs mixdown vs
+// instrumental. Cover, ZIP, PDF e MP3 saem do tipo do ficheiro, nao do nome.
+const canPickSlot = (f) => f.ext === "wav" && f.category !== "stems";
+
+// Dropdown para corrigir o slot. O app adivinha pelo nome; quando erra, era o
+// produtor que tinha de renomear o ficheiro e voltar a arrastar a pasta — e
+// so reparava se lesse a lista com atencao. `slots` vem do Rust (wav_slots),
+// nunca escrito a mao aqui.
+function slotPicker(f, slots, onChange) {
+  const sel = document.createElement("select");
+  sel.className = "tag tag--field slot-picker";
+  sel.title = "Which slot this file is uploaded to";
+  for (const s of slots) {
+    const opt = document.createElement("option");
+    opt.value = s.category;
+    opt.textContent = s.label;
+    if (s.category === f.category) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  // Nome fora do padrao: o app nao tem palpite nenhum. Tem de ficar visivel
+  // que falta decidir — "Don't upload" ja e uma decisao, e nao foi tomada.
+  if (!slots.some((s) => s.category === f.category)) {
+    const opt = document.createElement("option");
+    opt.value = f.category;
+    opt.textContent = "Choose a slot…";
+    opt.selected = true;
+    sel.insertBefore(opt, sel.firstChild);
+    sel.classList.add("slot-picker--undecided");
+  }
+  sel.addEventListener("change", () => onChange(f, sel.value));
+  return sel;
+}
+
+function renderList(result, list, slots, onSlotChange) {
   list.innerHTML = "";
   for (const [i, f] of result.files.entries()) {
     const undef = f.category === "undefined";
@@ -197,7 +231,9 @@ function renderList(result, list) {
     main.appendChild(el("span", "file-row__name", f.filename));
 
     const meta = el("div", "file-row__meta");
-    if (f.upload_field) {
+    if (slots && slots.length && canPickSlot(f)) {
+      meta.appendChild(slotPicker(f, slots, onSlotChange));
+    } else if (f.upload_field) {
       meta.appendChild(el("span", "tag tag--field", f.upload_field));
     } else if (f.role === "skip") {
       meta.appendChild(el("span", "tag tag--skip", "not uploaded"));
@@ -213,9 +249,9 @@ function renderList(result, list) {
   }
 }
 
-export function renderScan(result, els) {
+export function renderScan(result, els, slots, onSlotChange) {
   els.resultsPath.textContent = result.folder;
   renderSummary(result, els.resultsSummary);
   renderWarnings(result, els.resultsWarnings);
-  renderList(result, els.resultsList);
+  renderList(result, els.resultsList, slots, onSlotChange);
 }
