@@ -50,12 +50,29 @@ function toSession(data) {
   return {
     accessToken: data.access_token,
     refreshToken: data.refresh_token,
-    expiresAt: data.expires_at || 0, // epoch seconds
+    // epoch seconds; o verify do 2FA devolve so expires_in
+    expiresAt: data.expires_at || (data.expires_in ? Math.floor(Date.now() / 1000) + data.expires_in : 0),
     email: data.user?.email || _session?.email || "",
   };
 }
 
-async function tokenRequest(grant, body) {
+// Pedido autenticado a /auth/v1 (usado no 2FA, com o token da 1.a etapa).
+async function authPost(path, accessToken, body) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1${path}`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error_description || data.msg || data.message || "Verification failed.");
+  return data;
+}
+
+async function tokenRequest(grant, body, { raw = false } = {}) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=${grant}`, {
     method: "POST",
     headers: {
@@ -70,12 +87,27 @@ async function tokenRequest(grant, body) {
       data.error_description || data.msg || data.error || "Login failed.";
     throw new Error(msg);
   }
-  return toSession(data);
+  return raw ? data : toSession(data);
 }
 
 /// Faz login com email/senha e persiste a sessao.
+/// Conta com 2FA: NAO persiste nada e devolve { mfa: { factorId, token } } — o
+/// site so aceita a sessao depois do codigo (aal2), por isso o app pede-o e
+/// chama verifyMfa().
 export async function login(email, password) {
-  const session = await tokenRequest("password", { email, password });
+  const data = await tokenRequest("password", { email, password }, { raw: true });
+  const factor = (data.user?.factors || []).find((f) => f.status === "verified" && f.factor_type === "totp");
+  if (factor) return { mfa: { factorId: factor.id, token: data.access_token, email: data.user?.email || email } };
+  const session = toSession(data);
+  await persist(session);
+  return session;
+}
+
+/// 2.a etapa do login com 2FA: codigo de 6 digitos da app de autenticacao.
+export async function verifyMfa(mfa, code) {
+  const ch = await authPost(`/factors/${mfa.factorId}/challenge`, mfa.token, {});
+  const data = await authPost(`/factors/${mfa.factorId}/verify`, mfa.token, { challenge_id: ch.id, code });
+  const session = toSession({ ...data, user: data.user || { email: mfa.email } });
   await persist(session);
   return session;
 }
