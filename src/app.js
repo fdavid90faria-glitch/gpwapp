@@ -9,7 +9,7 @@
 import { renderScan } from "./scanner-ui.js";
 import { runQc } from "./qc.js";
 import { loadDefaults, saveDefaults, GENRES } from "./config.js";
-import { login, loadSession, currentSession, clearSession, getValidToken } from "./supabase.js";
+import { login, verifyMfa, loadSession, currentSession, clearSession, getValidToken } from "./supabase.js";
 
 const { invoke } = window.__TAURI__.core;
 const { getCurrentWebview } = window.__TAURI__.webview;
@@ -96,6 +96,7 @@ function cacheEls() {
   els.loginPassword = id("login-password");
   els.loginBtn = id("login-btn");
   els.loginError = id("login-error");
+  els.loginCode = id("login-code");
   // settings
   els.settings = id("settings");
   els.settingsClose = id("settings-close");
@@ -263,25 +264,44 @@ async function loadProfile() {
   }
 }
 
+// Conta com 2FA: depois da senha, o mesmo formulario pede o codigo de 6 digitos.
+let pendingMfa = null;
+
 async function onLogin() {
   const email = els.loginEmail.value.trim();
   const password = els.loginPassword.value;
-  if (!email || !password) {
+  const code = (els.loginCode?.value || "").replace(/\s/g, "");
+  if (pendingMfa && !/^\d{6}$/.test(code)) {
+    els.loginError.textContent = "Enter the 6-digit code from your authenticator app.";
+    return;
+  }
+  if (!pendingMfa && (!email || !password)) {
     els.loginError.textContent = "Enter your email and password.";
     return;
   }
   els.loginBtn.disabled = true;
-  els.loginBtn.textContent = "Signing in…";
+  els.loginBtn.textContent = pendingMfa ? "Verifying…" : "Signing in…";
   els.loginError.textContent = "";
   try {
-    state.session = await login(email, password);
+    const r = pendingMfa ? await verifyMfa(pendingMfa, code) : await login(email, password);
+    if (r && r.mfa) {
+      pendingMfa = r.mfa;
+      els.loginCode.classList.remove("hidden");
+      els.loginCode.value = "";
+      els.loginCode.focus();
+      els.loginError.textContent = "Two-factor authentication is on. Enter the 6-digit code from your authenticator app.";
+      return;
+    }
+    pendingMfa = null;
+    els.loginCode?.classList.add("hidden");
+    state.session = r;
     setAccountUI();
     enterApp();
   } catch (err) {
     els.loginError.textContent = err.message || "Login failed.";
   } finally {
     els.loginBtn.disabled = false;
-    els.loginBtn.textContent = "Log in";
+    els.loginBtn.textContent = pendingMfa ? "Verify code" : "Log in";
   }
 }
 
