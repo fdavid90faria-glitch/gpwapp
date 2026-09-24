@@ -37,11 +37,10 @@ function qcRole(f) {
     f.category === "radio_instrumental"
   )
     return "master";
-  const n = f.filename.toLowerCase();
-  if (n.includes("instrumental") && n.includes("master")) return "master";
   // Mixdowns (headroom p/ masterizacao, peak <= -3 dB): Extended Mixdown,
   // Extended Instrumental Mixdown, Radio Mixdown e Radio Instrumental Mixdown.
-  // Stems ja tratados acima.
+  // Stems ja tratados acima. A categoria vem antes do nome: o slot escolhido
+  // manda, mesmo que o nome diga "master".
   if (
     f.category === "extended_mixdown" ||
     f.category === "extended_instrumental_mixdown" ||
@@ -49,6 +48,9 @@ function qcRole(f) {
     f.category === "radio_instrumental_mixdown"
   )
     return "mixdown";
+  // "unmastered" contem "master" — mesma guarda do scanner.rs.
+  const n = f.filename.toLowerCase();
+  if (n.includes("instrumental") && n.includes("master") && !n.includes("unmaster")) return "master";
   return "silence"; // indefinidos: so acusa vazio
 }
 
