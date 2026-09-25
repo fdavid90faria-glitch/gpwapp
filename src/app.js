@@ -759,12 +759,10 @@ async function onContinue() {
     }
 
     // Abre a pagina de upload do site com auto-login (token no hash) + draft id.
-    token = await getValidToken();
-    const hash = `#gpw_at=${encodeURIComponent(token)}&gpw_rt=${encodeURIComponent(currentSession()?.refreshToken || "")}`;
-    const url = `${GPW_BASE}/upload.html?edit=${encodeURIComponent(draftId)}${hash}`;
+    const url = await uploadPageUrl(draftId);
     let opened = true;
     try { await openExternal(url); } catch (e) { opened = false; console.warn("open failed:", e); }
-    renderContinueSuccess({ warnings: failed }, url, opened);
+    renderContinueSuccess({ warnings: failed }, draftId, opened);
   } catch (err) {
     els.continueStatus.textContent = "";
     els.continueBtn.disabled = false;
@@ -775,7 +773,17 @@ async function onContinue() {
   }
 }
 
-function renderContinueSuccess(res, url, opened) {
+// URL da pagina de upload com auto-login, montado NA HORA de abrir. Desde
+// 2026-09-25 o site recusa um access token expirado (ja nao cai no refresh
+// token), e o botao "Open upload page again" reutilizava o URL de ha uma hora.
+// minRemaining 300: folga para o relogio do PC atrasado.
+async function uploadPageUrl(draftId) {
+  const token = await getValidToken({ minRemaining: 300 });
+  const hash = `#gpw_at=${encodeURIComponent(token)}&gpw_rt=${encodeURIComponent(currentSession()?.refreshToken || "")}`;
+  return `${GPW_BASE}/upload.html?edit=${encodeURIComponent(draftId)}${hash}`;
+}
+
+function renderContinueSuccess(res, draftId, opened) {
   els.continueStatus.textContent = "";
   // Mantem o botao desabilitado: ja foi enviado, evita criar rascunho duplicado.
   // Para outra track, arraste uma nova pasta. Para reabrir, use o botao abaixo.
@@ -794,7 +802,8 @@ function renderContinueSuccess(res, url, opened) {
     )
   );
   const open = el("button", "btn btn--ghost btn--sm", opened ? "Open upload page again" : "Open upload page");
-  open.addEventListener("click", () => openExternal(url).catch((e) => console.warn("open failed:", e)));
+  open.addEventListener("click", () =>
+    uploadPageUrl(draftId).then(openExternal).catch((e) => console.warn("open failed:", e)));
   els.continueResult.appendChild(open);
 
   for (const w of res.warnings || []) {
