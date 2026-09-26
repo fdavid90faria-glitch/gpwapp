@@ -136,10 +136,10 @@ async fn fresh_token(app: &AppHandle, fallback: &str) -> String {
 // aqui. Verificado ANTES de enviar um byte: sem isto um WAV de 1.2GB subia
 // inteiro (~80 min a 2 Mbps) para o servidor o recusar no `complete`.
 fn max_bytes_for(fkey: &str) -> u64 {
-    if fkey == "stems" { 2 * 1024 * 1024 * 1024 } else { 1024 * 1024 * 1024 }
+    if fkey == "stems" { 3 * 1024 * 1024 * 1024 } else { 1024 * 1024 * 1024 }
 }
 fn max_label_for(fkey: &str) -> &'static str {
-    if fkey == "stems" { "2GB" } else { "1GB" }
+    if fkey == "stems" { "3GB" } else { "1GB" }
 }
 
 // ── CHAMADAS DE CONTROLO ──────────────────────────────────────
@@ -937,7 +937,7 @@ mod part_math {
             PART_SIZE * 2,            // exato, sem resto
             PART_SIZE * 3 + 12345,    // resto qualquer
             1_298_361_000,            // ~1.3GB, o caso real que originou isto
-            2 * 1024 * 1024 * 1024,   // 2GB, o teto dos stems
+            3 * 1024 * 1024 * 1024,   // 3GB, o teto dos stems
         ] {
             assert_tiles(total);
         }
@@ -1009,8 +1009,8 @@ mod part_math {
                 fkey, part_count(teto), max_parts_servidor
             );
         }
-        // Espelho de lib/upload-exts.js: stems 2GB, resto 1GB.
-        assert_eq!(max_bytes_for("stems"), 2 * 1024 * 1024 * 1024);
+        // Espelho de lib/upload-exts.js: stems 3GB, resto 1GB.
+        assert_eq!(max_bytes_for("stems"), 3 * 1024 * 1024 * 1024);
         assert_eq!(max_bytes_for("master"), 1024 * 1024 * 1024);
     }
 }
