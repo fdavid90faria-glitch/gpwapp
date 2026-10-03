@@ -15,7 +15,7 @@ export const GENRES = [
   "Electro House", "Funky House", "Future Bass", "Future House", "Grime",
   "Hard Dance", "Hard Techno", "Hardcore", "Hardstyle", "House", "Hyperpop",
   "Indie Dance", "Indie Tech", "Jackin House", "Latin Electronic", "LoFi", "Mainstage", "Melodic House", "Melodic Techno",
-  "Minimal", "Moombahton", "Neo Rave", "Nu Disco", "Organic", "Phonk", "Pop", "Progressive House",
+  "Minimal", "Minimal Tech", "Moombahton", "Neo Rave", "Nu Disco", "Organic", "Phonk", "Pop", "Progressive House",
   "Psy-Trance", "Slap House", "Speed Garage", "Synthwave", "Tech House", "Techno",
   "Trance", "Trap", "UK Garage",
 ];
