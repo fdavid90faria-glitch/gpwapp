@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::ShellExt;
 
@@ -48,7 +49,7 @@ struct Progress {
     error: Option<String>,
 }
 
-/// Pasta de saida dos MP3 (temp do SO). Reutilizada e sobrescrita a cada run.
+/// Pasta de saida dos MP3 (temp do SO). Cada conversao tem nome proprio dentro dela.
 fn output_dir() -> Result<PathBuf, String> {
     let dir = std::env::temp_dir().join("gpw-uploader").join("mp3");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Falha ao criar pasta de saída: {}", e))?;
@@ -67,7 +68,16 @@ async fn convert_one(app: AppHandle, out_dir: PathBuf, m: MasterInput) -> Conver
         },
     );
 
-    let out_path = out_dir.join(&m.out_name);
+    // Nome UNICO por conversao. Com o nome fixo, um LAME de uma ronda antiga
+    // (outra pasta, slot corrigido) ou de outra instancia do app continuava a
+    // escrever no mesmo ExtendedMaster.mp3 — o MP3 enviado saia de outra track
+    // ou colado de duas (auditoria 2026-10-15 #1). O site recebe o out_name,
+    // nunca o nome em disco.
+    // ponytail: os MP3 antigos ficam no temp (~15MB por ronda); limpar no
+    // arranque se o temp do produtor comecar a encher.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let out_path = out_dir.join(format!("{}-{}-{}", std::process::id(), n, m.out_name));
     let out_str = out_path.to_string_lossy().to_string();
 
     // LAME (libmp3lame): WAV->MP3 320k CBR, -q 0 = maior qualidade de encoding.
