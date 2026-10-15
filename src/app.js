@@ -193,11 +193,17 @@ async function checkForUpdates() {
     // nos, nao que e desta versao — um latest.json adulterado podia anunciar
     // "9.9.9" com o instalador antigo. O trusted comment da .sig (coberto pela
     // assinatura que o updater confere) tem o nome do ficheiro com a versao.
-    const sig = update?.rawJson?.platforms?.["windows-x86_64"]?.signature;
-    if (sig) {
-      let txt = "";
-      try { txt = atob(sig); } catch {}
-      if (!txt.includes(`_${update.version}_x64-setup.exe`)) {
+    // Todas as entradas windows-x86_64* (o updater prefere a "-nsis" se
+    // existir) e falha FECHADO: sem assinatura para conferir, nao oferece.
+    if (update) {
+      const platforms = update.rawJson?.platforms || {};
+      const sigs = Object.keys(platforms)
+        .filter((k) => k.startsWith("windows-x86_64"))
+        .map((k) => platforms[k]?.signature || "");
+      const forThisVersion = (s) => {
+        try { return atob(s).includes(`_${update.version}_x64-setup.exe`); } catch { return false; }
+      };
+      if (!sigs.length || !sigs.every(forThisVersion)) {
         console.warn("update ignored: signature is not for version", update.version);
         return;
       }
