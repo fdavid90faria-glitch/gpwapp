@@ -200,8 +200,17 @@ async function checkForUpdates() {
       const sigs = Object.keys(platforms)
         .filter((k) => k.startsWith("windows-x86_64"))
         .map((k) => platforms[k]?.signature || "");
+      // So o "trusted comment" (3.a linha, a mesma posicao que o verificador
+      // minisign do Rust le e cuja assinatura global confere). A 1.a linha
+      // ("untrusted comment") NAO e assinada: procurar no texto todo deixava
+      // um atacante escrever la o nome com a versao nova.
       const forThisVersion = (s) => {
-        try { return atob(s).includes(`_${update.version}_x64-setup.exe`); } catch { return false; }
+        let lines;
+        try { lines = atob(s).split("\n").map((l) => l.replace(/\r$/, "")); } catch { return false; }
+        const trusted = lines[2] || "";
+        if (!trusted.startsWith("trusted comment: ")) return false;
+        const file = /(?:^|\t)file:([^\t]*)/.exec(trusted.slice("trusted comment: ".length));
+        return !!file && file[1].endsWith(`_${update.version}_x64-setup.exe`);
       };
       if (!sigs.length || !sigs.every(forThisVersion)) {
         console.warn("update ignored: signature is not for version", update.version);
