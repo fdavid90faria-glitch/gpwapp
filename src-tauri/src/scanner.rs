@@ -30,9 +30,10 @@ pub struct ScannedFile {
     pub upload_field: Option<String>,
     /// true para os mixes master (Extended/Radio) que geram MP3 na Fase 4
     pub is_master: bool,
-    /// Stem dentro de uma pasta "Ungrouped": os stems individuais que ja estao
-    /// dentro dos stems de grupo. Passam pelo QC por ficheiro, mas nao entram
-    /// na soma (contavam o mesmo som duas vezes e a soma "clipava").
+    /// Stem dentro de uma pasta "Ungrouped": os que ja estao dentro de um
+    /// grupo dos main stems (tudo o resto, que somado toca igual ao mixdown).
+    /// Passam pelo QC por ficheiro, mas nao entram na soma (contavam o mesmo
+    /// som duas vezes e a soma "clipava").
     pub ungrouped: bool,
 }
 

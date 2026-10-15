@@ -258,12 +258,13 @@ export async function runQc(scan, isCurrent, warningsEl) {
   const st = items.filter((x) => x.role === "stems" && x.analysis);
   const fromZip = st.filter((x) => x.file.role === "skip");
   const pool = fromZip.length ? fromZip : st;
-  // Os "Ungrouped" sao os stems individuais que ja estao dentro dos stems de
-  // grupo: somados juntos contavam o mesmo som duas vezes (soma a 0 dB numa
-  // track dentro do padrao). Ficam so com o QC por ficheiro. Sem stems de
-  // grupo nenhum, os ungrouped sao o conjunto completo e somam-se.
-  const grouped = pool.filter((x) => !x.file.ungrouped);
-  const stemPaths = (grouped.length ? grouped : pool).map((x) => x.file.path);
+  // Main stems = tudo FORA da pasta "Ungrouped" (grupos e stems soltos como
+  // um kick): somados, tocam igual ao mixdown. Os "Ungrouped" sao os stems
+  // que ja estao dentro dos grupos: somados junto contavam o mesmo som duas
+  // vezes (soma a 0 dB numa track dentro do padrao). Ficam so com o QC por
+  // ficheiro. Sem main stems nenhum, os ungrouped sao o conjunto e somam-se.
+  const main = pool.filter((x) => !x.file.ungrouped);
+  const stemPaths = (main.length ? main : pool).map((x) => x.file.path);
   if (stemPaths.length >= 2) {
     progress.textContent = "Checking audio… summing stems";
     try {
@@ -273,7 +274,7 @@ export async function runQc(scan, isCurrent, warningsEl) {
       if (sp != null && sp > -3)
         cross.push(
           `Summed stems peak ${fmtDb(sp)} dB above the max -3 dB (the ${sum.count} stems together clip` +
-            (grouped.length && grouped.length < pool.length ? `; the ${pool.length - grouped.length} ungrouped stems are not counted)` : ")")
+            (main.length && main.length < pool.length ? `; the ${pool.length - main.length} ungrouped stems are not counted)` : ")")
         );
       // Volume: o mixdown e a SOMA dos stems devem bater (LUFS integrado, +-1 dB).
       const mixItem = items.find((x) => x.file.category === "extended_mixdown" && x.analysis);
