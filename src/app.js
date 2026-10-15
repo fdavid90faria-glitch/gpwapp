@@ -189,6 +189,19 @@ async function checkForUpdates() {
     const updater = window.__TAURI__.updater;
     if (!updater?.check) return;
     const update = await updater.check();
+    // Anti-rollback: a assinatura so prova que o instalador foi assinado por
+    // nos, nao que e desta versao — um latest.json adulterado podia anunciar
+    // "9.9.9" com o instalador antigo. O trusted comment da .sig (coberto pela
+    // assinatura que o updater confere) tem o nome do ficheiro com a versao.
+    const sig = update?.rawJson?.platforms?.["windows-x86_64"]?.signature;
+    if (sig) {
+      let txt = "";
+      try { txt = atob(sig); } catch {}
+      if (!txt.includes(`_${update.version}_x64-setup.exe`)) {
+        console.warn("update ignored: signature is not for version", update.version);
+        return;
+      }
+    }
     if (update && (update.available ?? true)) {
       _pendingUpdate = update;
       els.updateText.textContent = `Version ${update.version} is available.`;
@@ -273,6 +286,15 @@ async function loadProfile() {
 // Conta com 2FA: depois da senha, o mesmo formulario pede o codigo de 6 digitos.
 let pendingMfa = null;
 
+// Volta ao passo da senha (outra conta, ou o token da 1.a etapa expirou).
+function resetMfa() {
+  if (!pendingMfa) return;
+  pendingMfa = null;
+  els.loginCode.classList.add("hidden");
+  els.loginCode.value = "";
+  els.loginBtn.textContent = "Log in";
+}
+
 async function onLogin() {
   const email = els.loginEmail.value.trim();
   const password = els.loginPassword.value;
@@ -308,6 +330,12 @@ async function onLogin() {
     enterApp();
   } catch (err) {
     els.loginError.textContent = err.message || "Login failed.";
+    // O /challenge recusou o token da 1.a etapa (expirou): sem isto todas as
+    // tentativas seguintes falhavam ate reiniciar o app.
+    if (err.mfaStepExpired) {
+      resetMfa();
+      els.loginError.textContent = "The sign-in step expired — enter your password again.";
+    }
   } finally {
     els.loginBtn.disabled = false;
     els.loginBtn.textContent = pendingMfa ? "Verify code" : "Log in";
@@ -367,7 +395,7 @@ function setLastFolderUI() {
 
 function saveLastFolder(folder) {
   if (!folder) return;
-  localStorage.setItem(LAST_FOLDER_KEY, folder);
+  try { localStorage.setItem(LAST_FOLDER_KEY, folder); } catch {}
   state.lastFolder = folder;
   setLastFolderUI();
 }
@@ -478,7 +506,9 @@ async function convertMasters(scan, run) {
     }
     const failed = results.filter((r) => !r.ok);
     if (failed.length) {
-      warnLine(`⚠ MP3 conversion failed for ${failed.map((r) => r.label).join(", ")} — the upload will continue without them.`);
+      warnLine(
+        `⚠ MP3 conversion failed for ${failed.map((r) => `${r.label} (${r.error || "unknown error"})`).join(", ")} — Continue tries again; if it keeps failing, close the program using the file or wait for the copy/OneDrive, then Rescan.`
+      );
     }
   } catch (err) {
     if (run !== scanRun) return;
@@ -688,10 +718,40 @@ function continueError(msg) {
   els.continueResult.appendChild(retry);
 }
 
+// Um Continue/Retry de cada vez. O state.uploading so liga depois dos await
+// iniciais (stat, conversoes, token): um duplo clique nesse intervalo criava
+// dois rascunhos e dois uploads em paralelo.
+let continueBusy = false;
 async function onContinue() {
-  if (!state.scan || state.uploading) return; // evita upload duplo (clique duplo)
+  if (continueBusy) return;
+  continueBusy = true;
+  try {
+    await runContinue();
+  } finally {
+    continueBusy = false;
+  }
+}
+
+async function runContinue() {
+  if (!state.scan || state.uploading) return;
   const d = state.defaults;
   const a = state.analysis;
+
+  // MP3 que falhou por um erro passageiro (ficheiro preso pelo OneDrive ou
+  // ainda a copiar) ficava perdido ate a um Rescan: tenta outra vez agora.
+  const bad = state.converted.filter((c) => !c.ok);
+  if (bad.length) {
+    els.continueStatus.textContent = "Converting MP3s again…";
+    try {
+      const again = await invoke("convert_masters", {
+        masters: bad.map((c) => ({ path: c.source, field: c.field, out_name: c.out_name, label: c.label })),
+      });
+      state.converted = state.converted.filter((c) => c.ok).concat(again);
+    } catch (e) {
+      console.warn("convert_masters retry failed:", e);
+    }
+    els.continueStatus.textContent = "";
+  }
 
   const files = buildUploadFiles();
   if (!files.some((f) => f.field === "file")) {
@@ -708,8 +768,10 @@ async function onContinue() {
     os: d.os,
     daw: d.daw,
     daw_version: d.daw_version,
-    plugins: d.plugins,
-    hardware: d.hardware,
+    // Teto: o draft-create recusa metadata > 20000 ("Metadata too large."),
+    // sem dizer que a causa e o texto das Settings, e o Retry repetia o erro.
+    plugins: (d.plugins || "").slice(0, 2000),
+    hardware: (d.hardware || "").slice(0, 2000),
     // Padrao de personalizacao (Settings) → pre-preenche o chkCustomize do site.
     customization: {
       enabled: !!d.default_customization,
@@ -962,10 +1024,19 @@ async function wireDragDrop() {
 
 window.addEventListener("DOMContentLoaded", async () => {
   cacheEls();
-  state.lastFolder = localStorage.getItem(LAST_FOLDER_KEY) || "";
+  // localStorage pode lancar (perfil do WebView2 corrompido/sem espaco): e so
+  // uma conveniencia, nao pode parar o arranque.
+  try { state.lastFolder = localStorage.getItem(LAST_FOLDER_KEY) || ""; } catch {}
 
   // Auth (form: Enter submete a partir de qualquer campo)
   els.loginForm.addEventListener("submit", (e) => { e.preventDefault(); onLogin(); });
+  // Mudar email/senha no passo do codigo = outra tentativa de login.
+  els.loginEmail.addEventListener("input", resetMfa);
+  els.loginPassword.addEventListener("input", resetMfa);
+  // F5/Ctrl+R a meio do upload perdia o ciclo de envio sem aviso.
+  window.addEventListener("beforeunload", (e) => {
+    if (state.uploading) { e.preventDefault(); e.returnValue = ""; }
+  });
   els.logoutBtn.addEventListener("click", onLogout);
   // Settings
   // Settings volta a secao de onde veio (antes ia sempre para a dropzone, e um
@@ -978,7 +1049,12 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
   els.settingsClose.addEventListener("click", () => show(settingsPrevSection || els.dropzone));
 
-  els.guideBtn.addEventListener("click", () => { guidePrevSection = currentSection(); show(els.guide); });
+  // Com o Guide ja aberto, currentSection() nao o ve e devolvia a dropzone:
+  // o Done ia parar la (no ecra de login, sem forma de entrar).
+  els.guideBtn.addEventListener("click", () => {
+    if (els.guide.classList.contains("hidden")) guidePrevSection = currentSection();
+    show(els.guide);
+  });
   els.guideClose.addEventListener("click", () => show(guidePrevSection || els.dropzone));
   els.settingsSave.addEventListener("click", onSettingsSave);
   // Results
@@ -1031,12 +1107,13 @@ window.addEventListener("DOMContentLoaded", async () => {
       // So o Supabase a recusar o refresh (4xx, menos o rate limit 429) quer
       // dizer sessao terminada. Sem rede ou com 5xx a sessao continua boa:
       // entra, e a proxima acao renova. Antes qualquer falha pedia login.
-      const ended = err.status >= 400 && err.status < 500 && err.status !== 429;
-      if (ended) {
-        clearSession();
+      const revoked = err.status >= 400 && err.status < 500 && err.status !== 429;
+      if (revoked) clearSession();
+      // !currentSession(): um logout ganhou a corrida ao refresh.
+      if (revoked || !currentSession()) {
         state.session = null;
         setAccountUI();
-        els.loginError.textContent = "Your session ended — log in again.";
+        if (revoked) els.loginError.textContent = "Your session ended — log in again.";
         show(els.login);
       } else {
         enterApp();

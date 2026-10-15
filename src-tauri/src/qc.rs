@@ -221,6 +221,9 @@ struct Acc {
     short_max: f64,
     short_max_t: f64,
     band: Option<Band>,
+    /// stems: o JS nao usa o LUFS short-term delas, e recalcula-lo a cada
+    /// 100 ms era a maior parte do custo do QC de um pack de 30 stems.
+    skip_short_term: bool,
 }
 
 impl Acc {
@@ -268,6 +271,9 @@ impl Acc {
             .map_err(|e| format!("ebur128: {}", e))?;
         self.frames_done += (self.buf.len() / self.channels) as u64;
         self.buf.clear();
+        if self.skip_short_term {
+            return Ok(());
+        }
         if let Ok(s) = self.ebur.loudness_shortterm() {
             if s.is_finite() && s > self.short_max {
                 self.short_max = s;
@@ -296,7 +302,10 @@ pub fn analyze(path: &str, category: &str) -> Result<QcAnalysis, String> {
     let ebur = EbuR128::new(spec.channels as u32, rate, Mode::I | Mode::S)
         .map_err(|e| format!("ebur128: {}", e))?;
     let hop = (rate as usize / 10).max(1) * channels;
-    let band = (!category.is_empty()).then(|| Band::new(channels, rate as f64));
+    // Stems: sem heuristico de vocal (qc.js nunca o mostra para stems) nem
+    // short-term — cada stem custava ~2 s em vez de ~0,9 s.
+    let stems = category == "stems";
+    let band = (!category.is_empty() && !stems).then(|| Band::new(channels, rate as f64));
     let mut acc = Acc {
         channels,
         rate,
@@ -312,6 +321,7 @@ pub fn analyze(path: &str, category: &str) -> Result<QcAnalysis, String> {
         short_max: f64::NEG_INFINITY,
         short_max_t: 0.0,
         band,
+        skip_short_term: stems,
     };
 
     if is_float {

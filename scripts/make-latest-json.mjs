@@ -10,6 +10,7 @@
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash, createPublicKey, verify } from "node:crypto";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -41,6 +42,28 @@ if (!sigName || !exeName) {
 }
 
 const signature = readFileSync(join(nsisDir, sigName), "utf8").trim();
+
+// Confere a .sig contra o instalador e a pubkey do tauri.conf ANTES de publicar.
+// Uma .sig velha (build sem a chave) ou de outra chave passava, e o updater de
+// todos os produtores recusava a versao em silencio.
+{
+  const pubLines = Buffer.from(conf.plugins.updater.pubkey, "base64").toString().trim().split("\n");
+  const pubRaw = Buffer.from(pubLines[1], "base64"); // "Ed" | keynum(8) | pk(32)
+  const pk = createPublicKey({
+    key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), pubRaw.subarray(10)]),
+    format: "der",
+    type: "spki",
+  });
+  const sigLines = Buffer.from(signature, "base64").toString().trim().split("\n");
+  const sigRaw = Buffer.from(sigLines[1], "base64"); // alg(2) | keynum(8) | sig(64)
+  const data = readFileSync(join(nsisDir, exeName));
+  const msg = sigRaw.subarray(0, 2).toString() === "ED" ? createHash("blake2b512").update(data).digest() : data;
+  const sameKey = pubRaw.subarray(2, 10).equals(sigRaw.subarray(2, 10));
+  if (!sameKey || !verify(null, msg, pk, sigRaw.subarray(10, 74))) {
+    console.error(`A assinatura ${sigName} NAO corresponde a ${exeName} e a pubkey do tauri.conf.json.\nRefaca o build com TAURI_SIGNING_PRIVATE_KEY definida.`);
+    process.exit(1);
+  }
+}
 // O GitHub troca espaços por pontos no nome do asset baixável.
 const assetName = exeName.replaceAll(" ", ".");
 const url = `https://github.com/${REPO}/releases/download/v${version}/${assetName}`;

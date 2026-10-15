@@ -77,8 +77,21 @@ async fn convert_one(app: AppHandle, out_dir: PathBuf, m: MasterInput) -> Conver
     // arranque se o temp do produtor comecar a encher.
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let out_path = out_dir.join(format!("{}-{}-{}", std::process::id(), n, m.out_name));
+    // So o nome do ficheiro: o out_name vem do webview e nunca e um caminho.
+    let out_name = std::path::Path::new(&m.out_name)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "master.mp3".into());
+    let out_path = out_dir.join(format!("{}-{}-{}", std::process::id(), n, out_name));
     let out_str = out_path.to_string_lossy().to_string();
+    // O LAME nao e long-path-aware: acima de 260 caracteres so abre o ficheiro
+    // com o prefixo \\?\ (o resto do app aguenta esses caminhos).
+    let in_path = if m.path.len() >= 260 && !m.path.starts_with(r"\\") {
+        format!(r"\\?\{}", m.path)
+    } else {
+        m.path.clone()
+    };
+    let stamp = || std::fs::metadata(&m.path).ok().map(|md| (md.len(), md.modified().ok()));
 
     // LAME (libmp3lame): WAV->MP3 320k CBR, -q 0 = maior qualidade de encoding.
     let result = async {
@@ -86,11 +99,17 @@ async fn convert_one(app: AppHandle, out_dir: PathBuf, m: MasterInput) -> Conver
             .shell()
             .sidecar("lame")
             .map_err(|e| format!("LAME sidecar indisponível: {}", e))?;
+        let before = stamp();
         let output = sidecar
-            .args(["--cbr", "-b", "320", "-q", "0", &m.path, &out_str])
+            .args(["--cbr", "-b", "320", "-q", "0", &in_path, &out_str])
             .output()
             .await
             .map_err(|e| format!("Falha ao executar LAME: {}", e))?;
+        // WAV ainda a ser escrito pelo DAW: o LAME le ate onde existe e sai
+        // com 0, e o MP3 truncado passava como "Done".
+        if stamp() != before {
+            return Err("source file is still being written — wait for the export to finish and Rescan".into());
+        }
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

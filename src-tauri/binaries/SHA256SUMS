@@ -1,0 +1,9 @@
+# SHA-256 dos binarios/vendors de terceiros que vao no instalador.
+# scripts/publish-release.ps1 recusa publicar se algum divergir. Ao atualizar
+# um destes ficheiros de proposito, atualizar o hash aqui no mesmo PR.
+#   LAME 3.100.1 64-bit (build Windows da RareWares, lame3.100.1-x64.zip)
+#   Essentia.js 0.1.3 (npm essentia.js@0.1.3, pasta dist)
+cdee20466ac2d1b6442fe83ede488586683bbacac0fc653900637292e735b97b  src-tauri/binaries/lame-x86_64-pc-windows-msvc.exe
+ea8891410df550d2b5a0ae53e64809516196f59607385b02475d79cd5a7df89f  src/essentia/essentia-wasm.web.js
+44cb2434da19a06f1e47decd9305699cfcd4a2c1641b4235a3a89183da62fd62  src/essentia/essentia-wasm.web.wasm
+64c87394ce8c7c9beed0af5c1b163121828e9852ff75a31fbf82a66b505e2e1d  src/essentia/essentia.js-core.js
