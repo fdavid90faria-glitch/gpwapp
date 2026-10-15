@@ -79,9 +79,23 @@ const UNDEFINED: Classification = Classification {
     is_master: false,
 };
 
+/// Alguma palavra do nome (partido em tudo o que nao e letra/digito) cumpre
+/// `pred`? Por substring, o titulo da track caia nas palavras-chave: "mid" em
+/// Midnight/Pyramid (projeto ia para o MIDI), "stem" em System, "radio" em
+/// Radioactive. Limite: nomes colados ("TrackStems.zip") deixam de casar e caem
+/// em indefinido, que a UI mostra.
+fn has_word(name_lower: &str, pred: impl Fn(&str) -> bool) -> bool {
+    name_lower.split(|c: char| !c.is_alphanumeric()).any(pred)
+}
+
+/// Nome de pasta/zip de stems: uma palavra que comeca por "stem" (Stems, Stem).
+fn is_stems_name(name_lower: &str) -> bool {
+    has_word(name_lower, |w| w.starts_with("stem"))
+}
+
 /// Classifica um WAV de audio pela nomenclatura (secao 3).
 fn classify_wav(name_lower: &str) -> Classification {
-    let radio = name_lower.contains("radio");
+    let radio = has_word(name_lower, |w| w == "radio");
     let instrumental = name_lower.contains("instrumental");
     // "Unmastered" e sinonimo de mixdown — e a palavra que a copy do site usa
     // ("the unmastered mixdown"), por isso e a que muitos produtores poem no
@@ -142,15 +156,10 @@ fn classify(name_lower: &str, ext: &str, in_stems_dir: bool) -> Classification {
         },
         "wav" => classify_wav(name_lower),
 
-        "mp3" => {
-            // MP3 ja pronto na pasta (raro - normalmente o app gera). Mapeia
-            // pelos 2 unicos slots do site.
-            if name_lower.contains("radio") {
-                Classification { category: "radio_mp3", label: "Radio Mix (MP3)", role: "mp3", upload_field: Some("xf_radio_mp3"), is_master: false }
-            } else {
-                Classification { category: "extended_mp3", label: "Extended Mix (MP3)", role: "mp3", upload_field: Some("xf_extended_mp3"), is_master: false }
-            }
-        }
+        // MP3 da pasta nunca sobe: o app gera os dois MP3 a partir dos masters.
+        // Antes qualquer .mp3 (um demo, o instrumental) ocupava o slot do
+        // Extended Mix MP3 e ainda cancelava a conversao do master.
+        "mp3" => Classification { category: "mp3_ignored", label: "MP3 (the app converts the masters)", role: "skip", upload_field: None, is_master: false },
 
         "mid" | "midi" => Classification { category: "midi", label: "MIDI", role: "support", upload_field: Some("xf_midi"), is_master: false },
 
@@ -165,11 +174,11 @@ fn classify(name_lower: &str, ext: &str, in_stems_dir: bool) -> Classification {
         "mp4" => Classification { category: "video", label: "Video", role: "support", upload_field: Some("xf_video"), is_master: false },
 
         "zip" => {
-            if name_lower.contains("stem") || in_stems_dir {
+            if is_stems_name(name_lower) || in_stems_dir {
                 Classification { category: "stems", label: "Stems (ZIP)", role: "support", upload_field: Some("xf_stems"), is_master: false }
-            } else if name_lower.contains("midi") || name_lower.contains("mid") {
+            } else if has_word(name_lower, |w| w == "midi" || w == "mid") {
                 Classification { category: "midi", label: "MIDI (ZIP)", role: "support", upload_field: Some("xf_midi"), is_master: false }
-            } else if name_lower.contains("project") || name_lower.contains("proj") {
+            } else if has_word(name_lower, |w| w.starts_with("proj")) {
                 Classification { category: "project", label: "Project (ZIP)", role: "support", upload_field: Some("xf_project"), is_master: false }
             } else {
                 UNDEFINED
@@ -224,7 +233,7 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
             if name_lower.starts_with('.') {
                 continue;
             }
-            let child_in_stems = in_stems_dir || name_lower.contains("stem");
+            let child_in_stems = in_stems_dir || is_stems_name(&name_lower);
             walk(&path, child_in_stems, depth + 1, out);
             continue;
         }
@@ -255,7 +264,7 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
         // duracao, stem vazia) — marcados sem upload_field para nao colidirem
         // com o zip nem serem enviados. Falha na extracao e ignorada (o upload
         // do zip nao depende disto).
-        if ext == "zip" && (name_lower.contains("stem") || in_stems_dir) {
+        if ext == "zip" && (is_stems_name(&name_lower) || in_stems_dir) {
             if let Ok(wavs) = extract_wavs_from_zip(&path.to_string_lossy()) {
                 for w in wavs {
                     let wname = Path::new(&w)
@@ -493,6 +502,32 @@ mod tests {
         assert_eq!(cat("teaser.mp4"), "video");
         assert_eq!(cat("random.txt"), "undefined");
         assert_eq!(cat("notes"), "undefined");
+    }
+
+    #[test]
+    fn mp3_da_pasta_nunca_sobe() {
+        // O app gera os MP3 dos masters; um MP3 solto tomava o slot do Extended.
+        for n in ["Track - Extended Instrumental.mp3", "demo.mp3", "Track - Radio Mix.mp3"] {
+            let c = classify(&n.to_lowercase(), "mp3", false);
+            assert_eq!(c.upload_field, None, "{}", n);
+            assert_ne!(c.category, "undefined", "{} nao e 'por identificar', e ignorado", n);
+        }
+    }
+
+    #[test]
+    fn titulo_da_track_nao_dispara_palavras_chave() {
+        // Por substring: "mid" em Midnight, "stem" em System, "radio" em Radioactive.
+        assert_eq!(cat("Midnight Drive - Project.zip"), "project");
+        assert_eq!(cat("Pyramid - Project.zip"), "project");
+        assert_eq!(cat("Midnight Drive - MIDI.zip"), "midi");
+        assert_eq!(cat("Sound System - MIDI.zip"), "midi");
+        assert_eq!(cat("Sound System - Stems.zip"), "stems");
+        assert_eq!(cat("Radioactive - Extended Mix.wav"), "extended_mix");
+        assert_eq!(cat("Radioactive - Radio Mix.wav"), "radio_mix");
+        assert!(!is_stems_name("system"));
+        assert!(!is_stems_name("ecosystem"));
+        assert!(is_stems_name("stems"));
+        assert!(is_stems_name("track - stems (wav)"));
     }
 
     #[test]

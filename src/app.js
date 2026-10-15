@@ -406,6 +406,9 @@ function buildMasters(scan) {
     const m = MP3_MAP[f.category];
     if (m && !existing.has(m.field)) {
       out.push({ path: f.path, field: m.field, out_name: m.out_name, label: m.label });
+      // Um MP3 por campo: o do 1.o master na ordem do scan, o mesmo WAV que
+      // buildUploadFiles envia. Dois "mix" no mesmo slot lancavam dois LAME.
+      existing.add(m.field);
     }
   }
   return out;
@@ -515,7 +518,11 @@ function onSlotChange(file, category) {
   // senao o buildUploadFiles ficava com o primeiro da ordem do scan e a
   // escolha do produtor era ignorada em silencio.
   if (slot.upload_field) {
-    const none = state.wavSlots.find((s) => s.category === "undefined");
+    // "not_uploaded" e o "Don't upload" do Rust (scanner::WAV_SLOTS). Com o
+    // "undefined" que estava aqui o find dava undefined, o Object.assign nao
+    // fazia nada e ficavam dois ficheiros no mesmo campo.
+    const none = state.wavSlots.find((s) => s.category === "not_uploaded");
+    if (!none) return;
     for (const f of state.scan.files) {
       if (f !== target && f.upload_field === slot.upload_field) Object.assign(f, none);
     }
@@ -526,6 +533,17 @@ function onSlotChange(file, category) {
   state.scan.has_extended_master = has("extended_mix");
   state.scan.has_radio_master = has("radio_mix");
   state.scan.undefined_count = state.scan.files.filter((f) => f.category === "undefined").length;
+
+  // Ja houve upload: o rascunho tem os ficheiros (e o BPM/key) da classificacao
+  // antiga, e uploadedFields so guarda nomes de campo — o Retry saltava o campo
+  // corrigido. Rascunho novo no proximo Continue; o antigo fica no site, como
+  // quando a pasta e arrastada outra vez.
+  if (state.draftId) {
+    state.draftId = null;
+    state.uploadedFields = new Set();
+    els.continueResult.classList.add("hidden");
+    els.uploadProgress.classList.add("hidden");
+  }
 
   applyScan(state.scan, ++scanRun);
 }
@@ -774,14 +792,13 @@ async function onContinue() {
   }
 }
 
-// URL da pagina de upload com auto-login, montado NA HORA de abrir. Desde
-// 2026-09-25 o site recusa um access token expirado (ja nao cai no refresh
-// token), e o botao "Open upload page again" reutilizava o URL de ha uma hora.
-// minRemaining 300: folga para o relogio do PC atrasado.
+// URL da pagina de upload do rascunho. O browser tem a sua propria sessao do
+// site: sem ela, o gpw-auth-gate manda para /login?redirect=... e volta ao
+// rascunho (uma vez por browser).
+// ponytail: login automatico no browser precisa de um codigo de uso unico
+// emitido pelo servidor; fazer se o login extra incomodar.
 async function uploadPageUrl(draftId) {
-  const token = await getValidToken({ minRemaining: 300 });
-  const hash = `#gpw_at=${encodeURIComponent(token)}&gpw_rt=${encodeURIComponent(currentSession()?.refreshToken || "")}`;
-  return `${GPW_BASE}/upload.html?edit=${encodeURIComponent(draftId)}${hash}`;
+  return `${GPW_BASE}/upload.html?edit=${encodeURIComponent(draftId)}`;
 }
 
 function renderContinueSuccess(res, draftId, opened) {
