@@ -69,7 +69,7 @@ pub fn wav_slots() -> Vec<scanner::Classification> {
 ///
 /// A analise so usa 90s do audio (45 do inicio + 45 do meio); ler um master de 10min
 /// (~1GB WAV) inteiro para a memoria (e copiar para o JS) e desperdicio.
-/// Para WAV PCM canonico devolvemos so o trecho inicial, com os tamanhos
+/// Para WAV PCM canonico devolvemos so esses trechos, com os tamanhos
 /// RIFF/data corrigidos para continuar sendo um WAV valido.
 #[tauri::command]
 pub async fn read_file_bytes(path: String) -> Result<Response, String> {
