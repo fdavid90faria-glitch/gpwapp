@@ -85,7 +85,8 @@ async function tokenRequest(grant, body, { raw = false } = {}) {
   if (!res.ok) {
     const msg =
       data.error_description || data.msg || data.error || "Login failed.";
-    throw new Error(msg);
+    // status: quem chama distingue "sessao terminou" (4xx) de rede/5xx.
+    throw Object.assign(new Error(msg), { status: res.status });
   }
   return raw ? data : toSession(data);
 }

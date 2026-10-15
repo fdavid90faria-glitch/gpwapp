@@ -245,7 +245,12 @@ export async function runQc(scan, isCurrent, warningsEl) {
 
   // Soma das stems: a SOMA de todos os stems nao pode passar de -3 dB de peak
   // (mesma regra do ANALYZER). Corre em Rust; falha silenciosa se der erro.
-  const stemPaths = items.filter((x) => x.role === "stems" && x.analysis).map((x) => x.file.path);
+  // Um conjunto so: com Stems/ e Stems.zip na pasta (o app pede para zipar a
+  // pasta) as stems eram somadas a dobrar — falso "clip" e falso "Mixdown 6 dB
+  // QUIETER". Havendo zip, contam as extraidas dele (role skip), que e o que sobe.
+  const st = items.filter((x) => x.role === "stems" && x.analysis);
+  const fromZip = st.filter((x) => x.file.role === "skip");
+  const stemPaths = (fromZip.length ? fromZip : st).map((x) => x.file.path);
   if (stemPaths.length >= 2) {
     progress.textContent = "Checking audio… summing stems";
     try {
@@ -261,7 +266,12 @@ export async function runQc(scan, isCurrent, warningsEl) {
         if (Math.abs(d) > 1)
           cross.push(`Mixdown is ${Math.abs(d).toFixed(1)} dB ${d > 0 ? "LOUDER" : "QUIETER"} (LUFS) than the summed stems`);
       }
-    } catch (e) { /* soma indisponivel — nao bloqueia */ }
+    } catch (e) {
+      // Nao bloqueia, mas nao pode acabar em "✓ Audio check passed" sem ter
+      // verificado a soma (ex.: uma stem mono no meio de estereos).
+      console.warn("qc_stems_sum failed:", e);
+      cross.push("Stems could not be summed (mixed mono/stereo or sample rates?) — the summed-peak and mixdown-vs-stems checks were skipped");
+    }
   }
   const failed = items.filter((x) => x.verdict && x.verdict.level === "fail").length;
   // Possivel voz numa track presumida instrumental: nao reprova nada, mas nao

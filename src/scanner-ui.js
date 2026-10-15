@@ -143,12 +143,14 @@ function renderWarnings(result, container) {
   }
 
   // Stems SOLTAS (WAVs numa pasta Stems/, nao um .zip): o site aceita as stems
-  // como UM ficheiro .zip. Aviso claro em vez da mensagem de colisao de slot.
-  // (As stems extraidas de um zip vem com upload_field null e nao contam aqui.)
+  // como UM ficheiro .zip, e as soltas nao sobem (o scanner nao lhes da slot).
+  // As extraidas de um zip tem role "skip" e nao contam aqui. Com um zip de
+  // stems na pasta, as soltas sao so copia: sem aviso.
+  const hasStemsZip = result.files.some((f) => f.upload_field === "xf_stems");
   const looseStems = result.files.filter(
-    (f) => f.category === "stems" && f.ext === "wav" && f.upload_field === "xf_stems"
+    (f) => f.category === "stems" && f.ext === "wav" && f.role === "support"
   );
-  if (looseStems.length) {
+  if (looseStems.length && !hasStemsZip) {
     container.appendChild(
       el(
         "div",
@@ -158,12 +160,12 @@ function renderWarnings(result, container) {
     );
   }
 
-  // Dois arquivos no mesmo campo do upload (duas capas, dois WAVs com "mix"
-  // no nome): so o primeiro sera enviado. As stems soltas ja foram avisadas
-  // acima — nao repetir a colisao de slot por cada stem.
+  // Dois arquivos no mesmo campo do upload (duas capas, dois ZIPs de stems):
+  // so o primeiro sera enviado. Os WAVs em colisao ja chegam por decidir do
+  // scanner, e as stems soltas nao tem slot.
   const firstByField = new Map();
   for (const f of result.files) {
-    if (!f.upload_field || f.upload_field === "xf_stems") continue;
+    if (!f.upload_field) continue;
     const first = firstByField.get(f.upload_field);
     if (!first) {
       firstByField.set(f.upload_field, f);
@@ -235,7 +237,7 @@ function renderList(result, list, slots, onSlotChange) {
       meta.appendChild(slotPicker(f, slots, onSlotChange));
     } else if (f.upload_field) {
       meta.appendChild(el("span", "tag tag--field", f.upload_field));
-    } else if (f.role === "skip") {
+    } else if (f.role === "skip" || f.category === "stems") {
       meta.appendChild(el("span", "tag tag--skip", "not uploaded"));
     } else {
       meta.appendChild(el("span", "tag tag--undef", "categorize"));

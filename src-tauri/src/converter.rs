@@ -97,6 +97,15 @@ async fn convert_one(app: AppHandle, out_dir: PathBuf, m: MasterInput) -> Conver
             let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
             return Err(format!("LAME falhou: {}", tail));
         }
+        // O LAME 3.100.1 sai com 0 numa entrada que nao suporta (WAV float
+        // 64-bit) e escreve um MP3 vazio de ~2KB, que passava como "Done".
+        // ponytail: < 1 s a 320 kbps = saida invalida; um master real tem minutos.
+        let size = std::fs::metadata(&out_path).map(|md| md.len()).unwrap_or(0);
+        if size < 40_000 {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let why = stderr.lines().find(|l| l.contains("supported")).unwrap_or("unsupported input format");
+            return Err(format!("LAME produced an empty MP3 ({} B): {}", size, why.trim()));
+        }
         Ok(())
     }
     .await;

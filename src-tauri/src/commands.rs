@@ -34,9 +34,24 @@ pub fn ping() -> PingResult {
 }
 
 /// Escaneia a pasta de exportacao e classifica cada arquivo (Fase 2).
+/// Async + spawn_blocking: comando sincrono corre na main thread do Tauri, e a
+/// extracao dos zips de stems (GBs) congelava a janela.
 #[tauri::command]
-pub fn scan_folder(folder: String) -> Result<ScanResult, String> {
-    scanner::scan(&folder)
+pub async fn scan_folder(folder: String) -> Result<ScanResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        scanner::clear_stems_tmp();
+        scanner::scan(&folder)
+    })
+        .await
+        .map_err(|e| format!("Scan task failed: {}", e))?
+}
+
+/// Tamanho + mtime (ms) de cada caminho, None se ja nao existir. O Continue
+/// compara com o scan: um master re-exportado depois do scan subia com o MP3,
+/// o BPM/key e o QC do ficheiro antigo.
+#[tauri::command]
+pub fn stat_files(paths: Vec<String>) -> Vec<Option<(u64, u64)>> {
+    paths.iter().map(|p| fs::metadata(p).ok().map(|m| (m.len(), scanner::mtime_ms(&m)))).collect()
 }
 
 /// Os slots de WAV que a UI oferece para o produtor corrigir A MAO quando a
@@ -57,13 +72,17 @@ pub fn wav_slots() -> Vec<scanner::Classification> {
 /// Para WAV PCM canonico devolvemos so o trecho inicial, com os tamanhos
 /// RIFF/data corrigidos para continuar sendo um WAV valido.
 #[tauri::command]
-pub fn read_file_bytes(path: String) -> Result<Response, String> {
+pub async fn read_file_bytes(path: String) -> Result<Response, String> {
     const ANALYSIS_SECS: u64 = 90;
-    let bytes = match read_wav_head(&path, ANALYSIS_SECS) {
-        Some(b) => b,
-        None => fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path, e))?,
-    };
-    Ok(Response::new(bytes))
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = match read_wav_head(&path, ANALYSIS_SECS) {
+            Some(b) => b,
+            None => fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path, e))?,
+        };
+        Ok(Response::new(bytes))
+    })
+    .await
+    .map_err(|e| format!("Read task failed: {}", e))?
 }
 
 /// Le so os primeiros `max_secs` de um WAV, remontando um arquivo valido

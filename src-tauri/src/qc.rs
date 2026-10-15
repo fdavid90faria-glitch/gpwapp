@@ -45,6 +45,73 @@ const SILENCE_AMP: f32 = 0.001; // -60 dBFS
 const VOCAL_CENTER_MIN_DB: f64 = 3.0;
 const VOCAL_CENTER_MAX_DB: f64 = 9.0;
 
+type WavIn = std::io::Chain<std::io::Cursor<Vec<u8>>, std::io::Take<std::io::BufReader<std::fs::File>>>;
+
+/// Abre um WAV para o hound com um header canonico (fmt + data) e o data lido
+/// direto do disco. O hound 3.5.1 salta chunks desconhecidos SEM o byte de
+/// padding do RIFF: um bext/iXML de tamanho impar antes do data (WAVs de
+/// DAWs/BWF) desalinhava a leitura e o QC dava "Could not analyze" a um
+/// ficheiro valido. Aqui os chunks sao percorridos com o padding.
+/// ponytail: RF64 (> 4GB) continua sem suporte; um master tem no maximo 1GB.
+fn open_wav(path: &str) -> Result<hound::WavReader<WavIn>, String> {
+    use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
+    let bad = |m: &str| format!("Could not read WAV: {}", m);
+    let mut f = std::fs::File::open(path).map_err(|e| bad(&e.to_string()))?;
+    let file_len = f.metadata().map_err(|e| bad(&e.to_string()))?.len();
+    let mut riff = [0u8; 12];
+    f.read_exact(&mut riff).map_err(|_| bad("file too short"))?;
+    if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
+        return Err(bad("not a RIFF/WAVE file"));
+    }
+    let mut fmt: Option<Vec<u8>> = None;
+    loop {
+        let mut hdr = [0u8; 8];
+        f.read_exact(&mut hdr).map_err(|_| bad("no data chunk"))?;
+        let size = u64::from(u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]));
+        match &hdr[0..4] {
+            b"fmt " => {
+                if size > 1024 {
+                    return Err(bad("invalid fmt chunk"));
+                }
+                let mut body = vec![0u8; size as usize];
+                f.read_exact(&mut body).map_err(|_| bad("truncated fmt chunk"))?;
+                if size & 1 == 1 {
+                    f.seek(SeekFrom::Current(1)).map_err(|e| bad(&e.to_string()))?;
+                }
+                fmt = Some(body);
+            }
+            b"data" => {
+                let fmt = fmt.ok_or_else(|| bad("data chunk before fmt"))?;
+                if fmt.len() < 16 {
+                    return Err(bad("invalid fmt chunk"));
+                }
+                let align = u64::from(u16::from_le_bytes([fmt[12], fmt[13]])).max(1);
+                let pos = f.stream_position().map_err(|e| bad(&e.to_string()))?;
+                // tamanho declarado pode passar do ficheiro (0xFFFFFFFF de quem
+                // grava em streaming): fica o que existe, em frames inteiros.
+                let len = size.min(file_len.saturating_sub(pos)) / align * align;
+                let mut h = Vec::with_capacity(28 + fmt.len() + (fmt.len() & 1));
+                h.extend_from_slice(b"RIFF");
+                h.extend_from_slice(&u32::try_from(20 + fmt.len() as u64 + len).unwrap_or(u32::MAX).to_le_bytes());
+                h.extend_from_slice(b"WAVE");
+                h.extend_from_slice(b"fmt ");
+                h.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+                h.extend_from_slice(&fmt);
+                if fmt.len() & 1 == 1 {
+                    h.push(0);
+                }
+                h.extend_from_slice(b"data");
+                h.extend_from_slice(&(len as u32).to_le_bytes());
+                return hound::WavReader::new(Cursor::new(h).chain(BufReader::new(f).take(len)))
+                    .map_err(|e| bad(&e.to_string()));
+            }
+            _ => {
+                f.seek(SeekFrom::Current((size + (size & 1)) as i64)).map_err(|e| bad(&e.to_string()))?;
+            }
+        }
+    }
+}
+
 fn db(amp: f64) -> Option<f64> {
     (amp > 0.0).then(|| 20.0 * amp.log10())
 }
@@ -216,8 +283,7 @@ impl Acc {
 /// instrumentais, a track e presumida sem voz e e o master/mixdown que precisa
 /// de ser varrido. Quem decide mostrar o aviso e o JS (src/qc.js).
 pub fn analyze(path: &str, category: &str) -> Result<QcAnalysis, String> {
-    let mut reader =
-        hound::WavReader::open(path).map_err(|e| format!("Could not read WAV: {}", e))?;
+    let mut reader = open_wav(path)?;
     let spec = reader.spec();
     let channels = spec.channels as usize;
     if channels == 0 || spec.sample_rate == 0 {
@@ -322,7 +388,7 @@ pub fn analyze_stems_sum(paths: &[String]) -> Result<StemsSum, String> {
     let mut channels = 0usize;
     let mut max_frames = 0u64;
     for p in paths {
-        let reader = hound::WavReader::open(p).map_err(|e| format!("open {}: {}", p, e))?;
+        let reader = open_wav(p).map_err(|e| format!("open {}: {}", p, e))?;
         let spec = reader.spec();
         if spec.channels == 0 || spec.sample_rate == 0 {
             continue;
@@ -548,6 +614,31 @@ mod tests {
         let p = dir.join("nao_wav.wav");
         std::fs::write(&p, b"definitely not a wav").unwrap();
         assert!(analyze(p.to_str().unwrap(), "x").is_err());
+    }
+
+    #[test]
+    fn chunk_de_tamanho_impar_antes_do_data_e_lido() {
+        // bext/iXML de tamanho impar (com o pad byte do RIFF) entre o header e
+        // o fmt: o hound sozinho desalinha e recusa um WAV valido.
+        let p = gen("impar_base.wav", 220.0, 0.5, 2.0, 0.0, 24);
+        let orig = std::fs::read(&p).unwrap();
+        let mut w = orig[..12].to_vec();
+        w.extend_from_slice(b"bext");
+        w.extend_from_slice(&3u32.to_le_bytes());
+        w.extend_from_slice(b"abc\0"); // 3 bytes + pad
+        w.extend_from_slice(&orig[12..]);
+        let riff = (w.len() - 8) as u32;
+        w[4..8].copy_from_slice(&riff.to_le_bytes());
+        let q = std::env::temp_dir().join("gpw_qc_test").join("impar.wav");
+        std::fs::write(&q, &w).unwrap();
+        let q = q.to_string_lossy().into_owned();
+
+        assert!(hound::WavReader::open(&q).is_err(), "o hound sozinho ja le isto: o open_wav deixou de ser preciso");
+        let a = analyze(&q, "x").unwrap();
+        let b = analyze(&p, "x").unwrap();
+        assert!((a.duration - b.duration).abs() < 1e-9);
+        assert_eq!(a.sample_peak_db, b.sample_peak_db);
+        assert_eq!(a.lufs_integrated, b.lufs_integrated);
     }
 
     #[test]
