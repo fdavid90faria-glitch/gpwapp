@@ -67,7 +67,7 @@ pub fn wav_slots() -> Vec<scanner::Classification> {
 /// Usado pela analise de BPM/Key (Fase 3) para alimentar o Essentia sem ter
 /// um objeto File. Resposta binaria eficiente via tauri::ipc::Response.
 ///
-/// A analise so usa os primeiros 90s do audio; ler um master de 10min
+/// A analise so usa 90s do audio (45 do inicio + 45 do meio); ler um master de 10min
 /// (~1GB WAV) inteiro para a memoria (e copiar para o JS) e desperdicio.
 /// Para WAV PCM canonico devolvemos so o trecho inicial, com os tamanhos
 /// RIFF/data corrigidos para continuar sendo um WAV valido.
@@ -85,11 +85,11 @@ pub async fn read_file_bytes(path: String) -> Result<Response, String> {
     .map_err(|e| format!("Read task failed: {}", e))?
 }
 
-/// Le so os primeiros `max_secs` de um WAV, remontando um arquivo valido
-/// (header + chunks pre-data + data truncado em block_align). Devolve None se
-/// nao for um WAV parseavel ou se ele ja couber no limite — o caller le tudo.
+/// Le `max_secs` de um WAV (metade do inicio + metade do meio), remontando um
+/// arquivo valido (header + chunks pre-data + data em block_align). Devolve
+/// None se nao for um WAV parseavel ou se ele ja couber no limite — o caller le tudo.
 fn read_wav_head(path: &str, max_secs: u64) -> Option<Vec<u8>> {
-    use std::io::Read;
+    use std::io::{Read, Seek};
     let mut f = fs::File::open(path).ok()?;
     let mut riff = [0u8; 12];
     f.read_exact(&mut riff).ok()?;
@@ -109,11 +109,23 @@ fn read_wav_head(path: &str, max_secs: u64) -> Option<Vec<u8>> {
                 return None; // sem fmt antes do data: nao arriscamos cortar
             }
             let cap = (max_secs * byte_rate / block_align) * block_align;
-            if size <= cap {
+            // Tamanho declarado pode passar do ficheiro (0xFFFFFFFF de quem
+            // grava em streaming): conta o que existe.
+            let file_len = f.metadata().ok()?.len();
+            let pos = f.stream_position().ok()?;
+            let avail = size.min(file_len.saturating_sub(pos));
+            if avail <= cap {
                 return None; // audio ja e curto: caller le o arquivo inteiro
             }
+            // Metade do inicio + metade do MEIO da faixa. So o inicio dava a
+            // key de uma intro de percussao (afinacao do bombo); o BPM e o
+            // mesmo nas duas partes e aguenta a emenda.
+            let head = (cap / 2 / block_align) * block_align;
+            let mid = ((avail - (cap - head)) / 2 / block_align) * block_align;
             let mut data = vec![0u8; cap as usize];
-            f.read_exact(&mut data).ok()?;
+            f.read_exact(&mut data[..head as usize]).ok()?;
+            f.seek(std::io::SeekFrom::Start(pos + mid.max(head))).ok()?;
+            f.read_exact(&mut data[head as usize..]).ok()?;
             let total = u32::try_from(4 + pre.len() as u64 + 8 + cap).ok()?;
             let mut out = Vec::with_capacity(12 + pre.len() + 8 + data.len());
             out.extend_from_slice(b"RIFF");
@@ -424,6 +436,23 @@ mod tests {
         assert_eq!(riff_size as usize, out.len() - 8);
         let data_size = u32::from_le_bytes(out[40..44].try_into().unwrap());
         assert_eq!(data_size, 16);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn segunda_metade_vem_do_meio_da_faixa() {
+        let path = std::env::temp_dir().join("gpw_test_mid.wav");
+        let mut w = wav_fixture(100);
+        let data_start = w.len() - 100;
+        for (i, b) in w[data_start..].iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        std::fs::write(&path, &w).unwrap();
+        // 2s * 8 B/s = 16 bytes: 8 do inicio + 8 centrados nos 100 (offset 46)
+        let out = read_wav_head(path.to_str().unwrap(), 2).unwrap();
+        let data = &out[out.len() - 16..];
+        assert_eq!(&data[..8], &(0u8..8).collect::<Vec<_>>()[..]);
+        assert_eq!(&data[8..], &(46u8..54).collect::<Vec<_>>()[..]);
         let _ = std::fs::remove_file(&path);
     }
 
