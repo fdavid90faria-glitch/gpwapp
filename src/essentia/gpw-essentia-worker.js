@@ -49,6 +49,11 @@ self.onmessage = function (e) {
     if (!bpmRaw || bpmRaw < 40) {
       try { bpmRaw = essentia.RhythmExtractor2013(vec, 208, 'multifeature', 40).bpm || 0 } catch (x) {}
     }
+    // Metade ou dobro e ambiguo para qualquer estimador (85 e 170 soam iguais
+    // ao algoritmo) e o erro era sair a metade em trance/DnB/hardstyle (136 ->
+    // 68). Decisao do produto: mostrar sempre a leitura mais alta.
+    // ponytail: downtempo/LoFi abaixo de 100 sai dobrado; o produtor corrige no site.
+    if (bpmRaw > 0 && bpmRaw < 100) bpmRaw *= 2
     var k = essentia.KeyExtractor(vec)
     try { vec.delete() } catch (x) {}
     self.postMessage({ id: id, bpm: Math.round(bpmRaw), key: k.key, scale: k.scale })

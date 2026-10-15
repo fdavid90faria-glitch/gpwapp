@@ -17,6 +17,9 @@ pub struct ScannedFile {
     pub path: String,
     pub ext: String,
     pub size: u64,
+    /// mtime em ms (0 se indisponivel): o Continue confere se o ficheiro mudou
+    /// desde o scan (commands::stat_files).
+    pub modified: u64,
     /// slug interno da categoria (ex: "extended_mix", "stems", "undefined")
     pub category: String,
     /// rotulo legivel (ex: "Extended Mix", "Stems")
@@ -27,6 +30,11 @@ pub struct ScannedFile {
     pub upload_field: Option<String>,
     /// true para os mixes master (Extended/Radio) que geram MP3 na Fase 4
     pub is_master: bool,
+    /// Stem dentro de uma pasta "Ungrouped": os que ja estao dentro de um
+    /// grupo dos main stems (tudo o resto, que somado toca igual ao mixdown).
+    /// Passam pelo QC por ficheiro, mas nao entram na soma (contavam o mesmo
+    /// som duas vezes e a soma "clipava").
+    pub ungrouped: bool,
 }
 
 #[derive(Serialize)]
@@ -79,6 +87,15 @@ const UNDEFINED: Classification = Classification {
     is_master: false,
 };
 
+/// Ficheiro solto numa pasta de stems: so entra no QC; o que sobe e o .zip.
+const LOOSE_STEM: Classification = Classification {
+    category: "stems",
+    label: "Stem (loose — zip the folder)",
+    role: "support",
+    upload_field: None,
+    is_master: false,
+};
+
 /// Alguma palavra do nome (partido em tudo o que nao e letra/digito) cumpre
 /// `pred`? Por substring, o titulo da track caia nas palavras-chave: "mid" em
 /// Midnight/Pyramid (projeto ia para o MIDI), "stem" em System, "radio" em
@@ -96,14 +113,27 @@ fn is_stems_name(name_lower: &str) -> bool {
 /// Classifica um WAV de audio pela nomenclatura (secao 3).
 fn classify_wav(name_lower: &str) -> Classification {
     let radio = has_word(name_lower, |w| w == "radio");
-    let instrumental = name_lower.contains("instrumental");
+    let words: Vec<&str> = name_lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let pair = |a: &str, b: &[&str]| words.windows(2).any(|p| p[0] == a && b.contains(&p[1]));
+    let instrumental = name_lower.contains("instrumental") || words.iter().any(|w| *w == "inst" || *w == "instr");
     // "Unmastered" e sinonimo de mixdown — e a palavra que a copy do site usa
     // ("the unmastered mixdown"), por isso e a que muitos produtores poem no
     // nome. Como "unmastered" CONTEM "master", sem isto um
     // "...-extended-unmastered.wav" caia no slot do Extended Mix MASTER (o
     // campo `file`): o mixdown era enviado como se fosse o master. O mixdown e
     // sempre testado antes do master_kw nos dois ramos, por isso basta aqui.
-    let mixdown = name_lower.contains("mixdown") || name_lower.contains("unmaster");
+    // Os outros nomes comuns do mixdown, todos com "master"/"mix" dentro:
+    // Premaster, Pre-Master, Non-Mastered, Not Mastered, Mix Down. Por palavras
+    // e nao por substring: "Techno Master" tem "no master" la dentro.
+    const MASTER: &[&str] = &["master", "mastered"];
+    let mixdown = name_lower.contains("mixdown")
+        || name_lower.contains("unmaster")
+        || name_lower.contains("premaster")
+        || name_lower.contains("nonmaster")
+        || pair("mix", &["down"])
+        || pair("pre", MASTER)
+        || pair("non", MASTER)
+        || pair("not", MASTER);
     // "mixdown" tambem contem "mix", por isso o mixdown e checado antes.
     let master_kw = name_lower.contains("master") || name_lower.contains("mix");
 
@@ -147,13 +177,9 @@ fn classify(name_lower: &str, ext: &str, in_stems_dir: bool) -> Classification {
     match ext {
         // WAV dentro de pasta de stems e stem, nunca master ("Lead Mix.wav"
         // numa pasta Stems/ cairia no slot do Extended Mix sem este guard).
-        "wav" if in_stems_dir => Classification {
-            category: "stems",
-            label: "Stems",
-            role: "support",
-            upload_field: Some("xf_stems"),
-            is_master: false,
-        },
+        // Sem upload_field: o site so aceita as stems num .zip, e um WAV solto
+        // no xf_stems tirava o lugar ao zip valido. A UI pede para zipar.
+        "wav" if in_stems_dir => LOOSE_STEM,
         "wav" => classify_wav(name_lower),
 
         // MP3 da pasta nunca sobe: o app gera os dois MP3 a partir dos masters.
@@ -161,23 +187,31 @@ fn classify(name_lower: &str, ext: &str, in_stems_dir: bool) -> Classification {
         // Extended Mix MP3 e ainda cancelava a conversao do master.
         "mp3" => Classification { category: "mp3_ignored", label: "MP3 (the app converts the masters)", role: "skip", upload_field: None, is_master: false },
 
-        "mid" | "midi" => Classification { category: "midi", label: "MIDI", role: "support", upload_field: Some("xf_midi"), is_master: false },
+        // O site (lib/upload-exts.js allowedExts) so aceita MIDI e projeto em
+        // .zip, e nao tem slot de video nem de licenca no formulario. Antes
+        // estes subiam e eram recusados no fim, ja com o rascunho criado.
+        // Ficam por identificar, com o rotulo a dizer o que fazer.
+        "mid" | "midi" => Classification { label: "MIDI file — zip your MIDI files to upload them", ..UNDEFINED },
 
         "flp" | "als" | "alp" | "logic" | "logicx" | "cpr" | "ableton" | "ptx" | "song" | "bwproject" =>
-            Classification { category: "project", label: "Project File", role: "support", upload_field: Some("xf_project"), is_master: false },
+            Classification { label: "Project file — zip the project to upload it", ..UNDEFINED },
 
         "jpg" | "jpeg" | "png" | "webp" =>
             Classification { category: "cover", label: "Cover", role: "image", upload_field: Some("cover"), is_master: false },
 
-        "pdf" => Classification { category: "license", label: "License (PDF)", role: "support", upload_field: Some("xf_license"), is_master: false },
+        "pdf" => Classification { label: "PDF — not uploaded by the app", ..UNDEFINED },
 
-        "mp4" => Classification { category: "video", label: "Video", role: "support", upload_field: Some("xf_video"), is_master: false },
+        "mp4" => Classification { label: "Video — not uploaded by the app", ..UNDEFINED },
 
         "zip" => {
             if is_stems_name(name_lower) || in_stems_dir {
                 Classification { category: "stems", label: "Stems (ZIP)", role: "support", upload_field: Some("xf_stems"), is_master: false }
             } else if has_word(name_lower, |w| w == "midi" || w == "mid") {
                 Classification { category: "midi", label: "MIDI (ZIP)", role: "support", upload_field: Some("xf_midi"), is_master: false }
+            } else if has_word(name_lower, |w| w == "master") && has_word(name_lower, |w| w.starts_with("proj")) {
+                // Projeto de masterizacao: e o add-on "Master Project" do site,
+                // que o rascunho do app nao liga. Nao pode ir no slot do projeto.
+                Classification { label: "Master project — upload it on the site", ..UNDEFINED }
             } else if has_word(name_lower, |w| w.starts_with("proj")) {
                 Classification { category: "project", label: "Project (ZIP)", role: "support", upload_field: Some("xf_project"), is_master: false }
             } else {
@@ -188,12 +222,33 @@ fn classify(name_lower: &str, ext: &str, in_stems_dir: bool) -> Classification {
         _ => {
             // Sem extensao util: pode ser stem solto dentro de pasta "stems".
             if in_stems_dir {
-                Classification { category: "stems", label: "Stems", role: "support", upload_field: Some("xf_stems"), is_master: false }
+                LOOSE_STEM
             } else {
                 UNDEFINED
             }
         }
     }
+}
+
+pub fn mtime_ms(m: &fs::Metadata) -> u64 {
+    m.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn stems_tmp_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("gpw_uploader_stems")
+}
+
+/// Apaga as extracoes de stems anteriores (o comando scan_folder chama antes
+/// de cada scan): so a ronda atual precisa dos WAVs, e antes cada pack deixava
+/// ~1x o tamanho do zip no %TEMP% para sempre.
+/// ponytail: apaga tambem a extracao de uma 2.a instancia do app a correr ao
+/// mesmo tempo (o QC dela falha); raro, single-instance resolve se doer.
+pub fn clear_stems_tmp() {
+    let _ = fs::remove_dir_all(stems_tmp_root());
 }
 
 fn ext_of(name: &str) -> String {
@@ -213,8 +268,14 @@ fn is_mac_junk(path: &str) -> bool {
         .any(|c| c.eq_ignore_ascii_case("__MACOSX") || c.starts_with("._"))
 }
 
+/// Pasta (ou zip) com os stems individuais nao agrupados: "Ungrouped",
+/// "Ungrouped Stems". Por palavra, como as outras palavras-chave.
+fn is_ungrouped_name(name_lower: &str) -> bool {
+    has_word(name_lower, |w| w.starts_with("ungroup"))
+}
+
 /// Percorre a pasta recursivamente (profundidade limitada) coletando arquivos.
-fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>) {
+fn walk(dir: &Path, in_stems_dir: bool, in_ungrouped: bool, depth: usize, out: &mut Vec<ScannedFile>) {
     if depth > 5 {
         return;
     }
@@ -234,7 +295,8 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
                 continue;
             }
             let child_in_stems = in_stems_dir || is_stems_name(&name_lower);
-            walk(&path, child_in_stems, depth + 1, out);
+            let child_ungrouped = in_ungrouped || is_ungrouped_name(&name_lower);
+            walk(&path, child_in_stems, child_ungrouped, depth + 1, out);
             continue;
         }
 
@@ -244,19 +306,46 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
         }
 
         let ext = ext_of(&file_name);
-        let c = classify(&name_lower, &ext, in_stems_dir);
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        // Nome que o Windows guarda mas nao e Unicode valido (surrogate solto):
+        // o caminho "lossy" nao abria e falhava tarde, no QC e no upload.
+        let Some(path_s) = path.to_str().map(String::from) else {
+            out.push(ScannedFile {
+                filename: file_name.clone(),
+                path: String::new(),
+                ext,
+                size: 0,
+                modified: 0,
+                category: UNDEFINED.category.into(),
+                label: "Rename this file (invalid characters in the name)".into(),
+                role: UNDEFINED.role.into(),
+                upload_field: None,
+                is_master: false,
+                ungrouped: false,
+            });
+            continue;
+        };
+        // A capa so vem da raiz da pasta: uma imagem qualquer numa subpasta
+        // (screenshot, artwork antigo) ganhava a capa por ordem do nome.
+        let c = if depth > 0 && matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+            UNDEFINED
+        } else {
+            classify(&name_lower, &ext, in_stems_dir)
+        };
+        let md = entry.metadata().ok();
+        let ungrouped = in_ungrouped && c.category == "stems";
 
         out.push(ScannedFile {
             filename: file_name.clone(),
-            path: path.to_string_lossy().to_string(),
+            path: path_s.clone(),
             ext: ext.clone(),
-            size,
+            size: md.as_ref().map(|m| m.len()).unwrap_or(0),
+            modified: md.as_ref().map(mtime_ms).unwrap_or(0),
             category: c.category.to_string(),
-            label: c.label.to_string(),
+            label: if ungrouped { "Stem (ungrouped — checked, not summed)".into() } else { c.label.to_string() },
             role: c.role.to_string(),
             upload_field: c.upload_field.map(|s| s.to_string()),
             is_master: c.is_master,
+            ungrouped,
         });
 
         // Stems num .zip: o zip acima continua a ser o ficheiro enviado
@@ -265,8 +354,11 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
         // com o zip nem serem enviados. Falha na extracao e ignorada (o upload
         // do zip nao depende disto).
         if ext == "zip" && (is_stems_name(&name_lower) || in_stems_dir) {
-            if let Ok(wavs) = extract_wavs_from_zip(&path.to_string_lossy()) {
-                for w in wavs {
+            if let Ok(wavs) = extract_wavs_from_zip(&path_s) {
+                // Zip inteiro "Ungrouped Stems.zip" (ou dentro de Ungrouped/).
+                let zip_ungrouped = in_ungrouped || is_ungrouped_name(&name_lower);
+                for (w, in_ungrouped_dir) in wavs {
+                    let ungrouped = zip_ungrouped || in_ungrouped_dir;
                     let wname = Path::new(&w)
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -277,11 +369,13 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
                         path: w,
                         ext: "wav".into(),
                         size: wsize,
+                        modified: 0, // copia temporaria, nao sobe
                         category: "stems".into(),
-                        label: "Stem (from zip)".into(),
+                        label: if ungrouped { "Stem (from zip, ungrouped — checked, not summed)".into() } else { "Stem (from zip)".into() },
                         role: "skip".into(), // QC-only: nao entra no upload
                         upload_field: None,
                         is_master: false,
+                        ungrouped,
                     });
                 }
             }
@@ -290,9 +384,9 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
 }
 
 /// Extrai os WAVs de um .zip de stems para uma pasta temporaria e devolve os
-/// caminhos. So para QC (o zip original e que sobe no upload). Porta do
+/// caminhos (+ se a entrada estava numa pasta "Ungrouped"). So para QC (o zip original e que sobe no upload). Porta do
 /// GPW ANALYZER (extract_wavs_from_zip), com protecao contra nomes com pasta.
-fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
+fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<(String, bool)>, String> {
     let path = Path::new(zip_path);
     let name = path
         .file_stem()
@@ -301,11 +395,15 @@ fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
     let file = fs::File::open(path).map_err(|e| format!("open zip: {}", e))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("bad zip: {}", e))?;
 
-    let dest = std::env::temp_dir().join("gpw_uploader_stems").join(&name);
-    let _ = fs::remove_dir_all(&dest);
+    // Pasta propria por extracao: dois "Stems.zip" em pastas diferentes (ou um
+    // scan antigo ainda a correr) partilhavam a mesma e apagavam-se um ao outro.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dest = stems_tmp_root().join(format!("{}-{}-{}", std::process::id(), n, name));
     fs::create_dir_all(&dest).map_err(|e| format!("temp dir: {}", e))?;
 
     let mut out = Vec::new();
+    let mut used = std::collections::HashSet::new();
     for i in 0..archive.len() {
         let mut entry = match archive.by_index(i) {
             Ok(e) => e,
@@ -315,14 +413,29 @@ fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
         if !ename.to_lowercase().ends_with(".wav") || is_mac_junk(&ename) {
             continue;
         }
-        let base = ename.rsplit(['/', '\\']).next().unwrap_or(&ename).to_string();
+        // Nomes validos no macOS mas nao no Windows (" ? * < > | :) eram
+        // descartados em silencio; o ':' ("C:x.wav") ainda saia da pasta temp.
+        let base: String = ename
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&ename)
+            .chars()
+            .map(|c| if c < ' ' || "<>:\"|?*".contains(c) { '_' } else { c })
+            .collect();
+        // Mesmo nome em subpastas diferentes ("Drums/FX.wav", "Synths/FX.wav"):
+        // o 2.o sobrescrevia o 1.o e a soma contava um deles duas vezes.
+        let base = if used.insert(base.to_lowercase()) { base } else { format!("{}_{}", i, base) };
         let target = dest.join(&base);
         let mut f = match fs::File::create(&target) {
             Ok(f) => f,
             Err(_) => continue,
         };
         if std::io::copy(&mut entry, &mut f).is_ok() {
-            out.push(target.to_string_lossy().to_string());
+            // a pasta perde-se na extracao (achatada): guarda-se aqui
+            let mut dirs: Vec<&str> = ename.split(['/', '\\']).collect();
+            dirs.pop();
+            let ungrouped = dirs.iter().any(|d| is_ungrouped_name(&d.to_lowercase()));
+            out.push((target.to_string_lossy().to_string(), ungrouped));
         }
     }
     if out.is_empty() {
@@ -333,20 +446,40 @@ fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
 
 /// Comando exposto ao frontend: escaneia uma pasta de exportacao.
 pub fn scan(folder: &str) -> Result<ScanResult, String> {
-    let mut dir = Path::new(folder);
+    let dir = Path::new(folder);
     if !dir.exists() {
         return Err(format!("Folder not found: {}", folder));
     }
-    // Arrastar um arquivo em vez da pasta: escaneia a pasta pai.
+    // Um ficheiro arrastado escaneava a pasta-mae inteira, e os ficheiros de
+    // outras tracks que la estivessem disputavam os slots.
     if !dir.is_dir() {
-        dir = dir
-            .parent()
-            .filter(|p| p.is_dir())
-            .ok_or_else(|| format!("Path is not a folder: {}", folder))?;
+        return Err("Drop the track's export folder, not a single file.".into());
     }
 
     let mut files = Vec::new();
-    walk(dir, false, 0, &mut files);
+    walk(dir, false, false, 0, &mut files);
+
+    // Dois WAVs no mesmo slot: o desempate era a ordem do nome ("Track
+    // Extended Mix (v2).wav" ganhava ou perdia ao acaso). Ficam os dois por
+    // decidir e o produtor escolhe no dropdown; sem master o Continue espera.
+    let mut per_field: std::collections::HashMap<String, usize> = Default::default();
+    for f in files.iter().filter(|f| f.ext == "wav" && f.category != "stems") {
+        if let Some(field) = &f.upload_field {
+            *per_field.entry(field.clone()).or_default() += 1;
+        }
+    }
+    for f in files.iter_mut() {
+        let dup = f.ext == "wav"
+            && f.category != "stems"
+            && f.upload_field.as_ref().is_some_and(|u| per_field[u] > 1);
+        if dup {
+            f.label = format!("Two files look like {} — choose a slot", f.label);
+            f.category = UNDEFINED.category.into();
+            f.role = UNDEFINED.role.into();
+            f.upload_field = None;
+            f.is_master = false;
+        }
+    }
 
     // Ordena: identificados primeiro (por categoria), indefinidos por ultimo.
     files.sort_by(|a, b| {
@@ -494,14 +627,68 @@ mod tests {
     fn outros_tipos() {
         assert_eq!(cat("cover.jpg"), "cover");
         assert_eq!(cat("artwork.png"), "cover");
-        assert_eq!(cat("project.flp"), "project");
-        assert_eq!(cat("session.als"), "project");
-        assert_eq!(cat("melody.mid"), "midi");
+        assert_eq!(cat("Track - Project.zip"), "project");
+        assert_eq!(cat("Track - MIDI.zip"), "midi");
         assert_eq!(cat("Stems.zip"), "stems");
-        assert_eq!(cat("license.pdf"), "license");
-        assert_eq!(cat("teaser.mp4"), "video");
         assert_eq!(cat("random.txt"), "undefined");
         assert_eq!(cat("notes"), "undefined");
+    }
+
+    #[test]
+    fn so_sobe_o_que_o_site_aceita() {
+        // lib/upload-exts.js no site: MIDI e projeto so em .zip; sem slot de
+        // video nem de licenca no formulario. Recusados la, ja com rascunho.
+        for n in ["project.flp", "session.als", "melody.mid", "license.pdf", "teaser.mp4", "Track Master Project.zip"] {
+            let c = classify(&n.to_lowercase(), &ext_of(n), false);
+            assert_eq!(c.category, "undefined", "{}", n);
+            assert_eq!(c.upload_field, None, "{}", n);
+        }
+        // Stems soltas (e lixo na pasta Stems/) entram no QC mas nao sobem:
+        // tiravam o lugar ao .zip no xf_stems.
+        for (n, ext) in [("kick.wav", "wav"), ("desktop.ini", "ini"), ("kick.asd", "asd")] {
+            let c = classify(n, ext, true);
+            assert_eq!(c.category, "stems", "{}", n);
+            assert_eq!(c.upload_field, None, "{}", n);
+        }
+        assert_eq!(classify("drums.zip", "zip", true).upload_field, Some("xf_stems"));
+    }
+
+    #[test]
+    fn sinonimos_de_mixdown_e_instrumental() {
+        for n in [
+            "Track - Extended Premaster.wav",
+            "Track - Extended Pre-Master.wav",
+            "Track - Extended Mix Down.wav",
+            "Track - Extended Non-Mastered.wav",
+            "Track - Extended Not Mastered.wav",
+        ] {
+            assert_eq!(cat(n), "extended_mixdown", "{}", n);
+        }
+        assert_eq!(cat("Track - Radio Premaster.wav"), "radio_mixdown");
+        assert_eq!(cat("Track - Extended Instr.wav"), "extended_instrumental");
+        assert_eq!(cat("Track - Extended Inst Premaster.wav"), "extended_instrumental_mixdown");
+        // Por palavras: "Techno Master" contem "no master", "Instinct" contem "inst".
+        assert_eq!(cat("Techno Master.wav"), "extended_mix");
+        assert_eq!(cat("Instinct - Extended Mix.wav"), "extended_mix");
+    }
+
+    #[test]
+    fn scan_recusa_ficheiro_e_empata_wavs_no_mesmo_slot() {
+        let dir = std::env::temp_dir().join(format!("gpw_scan_dup_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for n in ["Track - Extended Mix.wav", "Track - Extended Mix (v2).wav", "Track - Extended Mixdown.wav"] {
+            fs::write(dir.join(n), b"x").unwrap();
+        }
+        assert!(scan(&dir.join("Track - Extended Mix.wav").to_string_lossy()).is_err());
+
+        let r = scan(&dir.to_string_lossy()).unwrap();
+        assert!(!r.has_extended_master, "dois candidatos a master: nenhum e escolhido sozinho");
+        assert_eq!(r.undefined_count, 2);
+        let mixdown = r.files.iter().find(|f| f.filename == "Track - Extended Mixdown.wav").unwrap();
+        assert_eq!(mixdown.upload_field.as_deref(), Some("xf_extended_mixdown"));
+        assert!(r.files.iter().all(|f| f.modified > 0));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -557,6 +744,63 @@ mod tests {
     }
 
     #[test]
+    fn extracao_nao_perde_nem_escapa_stems() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("gpw_zip_names_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("Stems.zip");
+        let mut zw = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        for (n, body) in [("Drums/FX.wav", "a"), ("Synths/FX.wav", "b"), ("Lead?.wav", "c"), ("C:Bass.wav", "d")] {
+            zw.start_file(n, opts).unwrap();
+            zw.write_all(body.as_bytes()).unwrap();
+        }
+        zw.finish().unwrap();
+
+        let wavs: Vec<String> = extract_wavs_from_zip(&zip_path.to_string_lossy()).unwrap().into_iter().map(|(w, _)| w).collect();
+        assert_eq!(wavs.len(), 4, "{:?}", wavs);
+        let unique: std::collections::HashSet<_> = wavs.iter().collect();
+        assert_eq!(unique.len(), 4, "dois stems no mesmo ficheiro: {:?}", wavs);
+        let root = stems_tmp_root();
+        assert!(wavs.iter().all(|w| Path::new(w).starts_with(&root)), "fora da pasta temp: {:?}", wavs);
+        let bodies: Vec<String> = wavs.iter().map(|w| fs::read_to_string(w).unwrap()).collect();
+        for b in ["a", "b", "c", "d"] {
+            assert!(bodies.iter().any(|x| x == b), "stem {} perdido", b);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stems_ungrouped_ficam_marcados_em_pasta_e_em_zip() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("gpw_ungrouped_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Stems").join("Ungrouped")).unwrap();
+        fs::write(dir.join("Track - Extended Mix.wav"), b"x").unwrap();
+        fs::write(dir.join("Stems").join("Drums Group.wav"), b"x").unwrap();
+        fs::write(dir.join("Stems").join("Ungrouped").join("Kick.wav"), b"x").unwrap();
+        let zip_path = dir.join("Track Stems.zip");
+        let mut zw = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        for n in ["Stems/Bass Group.wav", "Stems/Ungrouped Stems/Sub.wav"] {
+            zw.start_file(n, opts).unwrap();
+            zw.write_all(b"x").unwrap();
+        }
+        zw.finish().unwrap();
+
+        let r = scan(&dir.to_string_lossy()).unwrap();
+        let flag = |n: &str| r.files.iter().find(|f| f.filename == n).unwrap_or_else(|| panic!("{} em falta", n)).ungrouped;
+        assert!(!flag("Drums Group.wav"));
+        assert!(flag("Kick.wav"));
+        assert!(!flag("Bass Group.wav"));
+        assert!(flag("Sub.wav"));
+        assert!(!flag("Track - Extended Mix.wav"));
+        // "Ungrouped" so marca stems: e continua a ser uma pasta de stems normal.
+        assert_eq!(r.files.iter().find(|f| f.filename == "Kick.wav").unwrap().category, "stems");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn zip_de_stems_feito_no_mac_ignora_os_appledouble() {
         use std::io::Write;
         let dir = std::env::temp_dir().join("gpw_uploader_macjunk_test");
@@ -572,6 +816,6 @@ mod tests {
 
         let wavs = extract_wavs_from_zip(&zip_path.to_string_lossy()).unwrap();
         assert_eq!(wavs.len(), 1);
-        assert!(wavs[0].ends_with("Kick.wav") && !wavs[0].contains("._"));
+        assert!(wavs[0].0.ends_with("Kick.wav") && !wavs[0].0.contains("._"));
     }
 }

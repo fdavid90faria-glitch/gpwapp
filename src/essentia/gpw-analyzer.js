@@ -46,10 +46,19 @@
     return _worker
   }
 
+  // Motor que nao arranca (WASM falhou a inicializar) ou algoritmo preso: sem
+  // resposta, a promessa ficava pendente e o Continue desativado para sempre.
+  // O timeout reusa o caminho do onerror (rejeita tudo e recria o worker).
+  const TIMEOUT_MS = 120000
+
   function analyzeInWorker(pcm) {
     const id = ++_seq
     return new Promise((resolve, reject) => {
-      _pending.set(id, { resolve, reject })
+      const t = setTimeout(() => {
+        if (_pending.has(id) && _worker) _worker.onerror({ message: 'Analysis timed out.' })
+      }, TIMEOUT_MS)
+      const done = (fn) => (v) => { clearTimeout(t); fn(v) }
+      _pending.set(id, { resolve: done(resolve), reject: done(reject) })
       // pcm.buffer transferido (é uma cópia nossa): evita clonar ~16MB.
       getWorker().postMessage({ id, pcm }, [pcm.buffer])
     })
@@ -73,9 +82,20 @@
     const arrayBuffer = await file.arrayBuffer()
     const data = await decodeToMono44k(arrayBuffer)
     const MAX = 44100 * 90 // cap a 90s por performance
-    // slice SEMPRE: o buffer vai ser transferido para o worker, e o original é
-    // uma vista sobre o AudioBuffer que ainda está vivo aqui.
-    const pcm = data.slice(0, Math.min(data.length, MAX))
+    // Copia SEMPRE: o buffer vai ser transferido para o worker, e o original é
+    // uma vista sobre o AudioBuffer que ainda está vivo aqui. Acima do teto:
+    // metade do início + metade do meio (como o read_file_bytes), para a key
+    // não sair só da intro.
+    let pcm
+    if (data.length <= MAX) {
+      pcm = data.slice()
+    } else {
+      const half = MAX >> 1
+      const mid = (data.length - half) >> 1
+      pcm = new Float32Array(MAX)
+      pcm.set(data.subarray(0, half))
+      pcm.set(data.subarray(mid, mid + (MAX - half)), half)
+    }
 
     const r = await analyzeInWorker(pcm)
     const keyName = `${r.key} ${r.scale}`

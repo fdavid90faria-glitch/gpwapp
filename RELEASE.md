@@ -1,8 +1,7 @@
 # Como publicar uma atualização (auto-updater)
 
 O app verifica o GitHub Releases ao abrir e instala atualizações sozinho. Este
-guia é o passo a passo de **cada nova versão**. O build é **local** (o FFmpeg
-tem 217 MB e fica só na sua máquina).
+guia é o passo a passo de **cada nova versão**. O build é **local**, na sua máquina.
 
 ## Pré-requisitos (uma vez só)
 
@@ -22,7 +21,8 @@ tem 217 MB e fica só na sua máquina).
 
 ### 1. Suba o número da versão
 Edite **`src-tauri/tauri.conf.json`** → `"version"` (ex.: `0.1.0` → `0.2.0`).
-(O `Cargo.toml` lê a versão do pacote; manter os dois iguais é boa prática.)
+Edite também o `version` de **`src-tauri/Cargo.toml`** para o mesmo número
+(o `publish-release.ps1` recusa publicar se forem diferentes).
 
 ### 2. Build assinado (PowerShell)
 ```powershell

@@ -1,0 +1,29 @@
+GPW Uploader — third-party software notices
+============================================
+
+LAME (MP3 encoder)
+------------------
+GPW Uploader runs LAME as a separate program (lame.exe, installed next to
+the app) to convert WAV masters to MP3. It is not linked into the app.
+
+  Version:    LAME 64bits 3.100.1 (Windows build of LAME 3.100)
+  Project:    https://lame.sourceforge.io
+  Copyright:  (c) 1999-2011 The LAME Project; (c) 1999-2001 Mark Taylor;
+              (c) 1998 Michael Cheng; (c) 1995-1997 Michael Hipp (mpglib)
+  License:    GNU Library General Public License, version 2 or (at your
+              option) any later version — full text in LGPL-2.0.txt, next
+              to this file.
+
+  Source code: LAME 3.100 is available at
+  https://sourceforge.net/projects/lame/files/lame/3.100/
+  For the exact source of the lame.exe shipped with this app, contact
+  GPW support through https://ghostproducerworld.com — it will be provided
+  for at least three years from the date you received this version.
+
+You may replace lame.exe with your own build of LAME; the app calls it as
+"lame --cbr -b 320 -q 0 <input.wav> <output.mp3>".
+
+This library is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU Library General Public License for
+more details.

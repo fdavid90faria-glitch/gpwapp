@@ -28,7 +28,6 @@ const FALLBACK_DEFAULTS = {
   daw_version: "",
   plugins: "",
   hardware: "",
-  default_price: 300,
   default_genre: "",
   default_project_for_sale: false,
   default_customization: false,
@@ -46,5 +45,9 @@ export function loadDefaults() {
 }
 
 export function saveDefaults(defaults) {
-  localStorage.setItem(DEFAULTS_KEY, JSON.stringify(defaults));
+  try {
+    localStorage.setItem(DEFAULTS_KEY, JSON.stringify(defaults));
+  } catch (err) {
+    console.warn("Failed to save defaults:", err);
+  }
 }

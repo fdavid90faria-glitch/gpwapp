@@ -106,7 +106,6 @@ function cacheEls() {
   els.defDawVersion = id("def-daw-version");
   els.defPlugins = id("def-plugins");
   els.defHardware = id("def-hardware");
-  els.defPrice = id("def-price");
   els.defGenre = id("def-genre");
   els.defProjectSale = id("def-project-sale");
   els.defCustomize = id("def-customize");
@@ -158,6 +157,7 @@ function show(section) {
 
 // Guia (abre por cima; ao fechar volta à secção onde o utilizador estava).
 let guidePrevSection = null;
+let settingsPrevSection = null;
 function currentSection() {
   for (const s of [els.login, els.settings, els.dropzone, els.results]) {
     if (s && !s.classList.contains("hidden")) return s;
@@ -188,6 +188,34 @@ async function checkForUpdates() {
     const updater = window.__TAURI__.updater;
     if (!updater?.check) return;
     const update = await updater.check();
+    // Anti-rollback: a assinatura so prova que o instalador foi assinado por
+    // nos, nao que e desta versao — um latest.json adulterado podia anunciar
+    // "9.9.9" com o instalador antigo. O trusted comment da .sig (coberto pela
+    // assinatura que o updater confere) tem o nome do ficheiro com a versao.
+    // Todas as entradas windows-x86_64* (o updater prefere a "-nsis" se
+    // existir) e falha FECHADO: sem assinatura para conferir, nao oferece.
+    if (update) {
+      const platforms = update.rawJson?.platforms || {};
+      const sigs = Object.keys(platforms)
+        .filter((k) => k.startsWith("windows-x86_64"))
+        .map((k) => platforms[k]?.signature || "");
+      // So o "trusted comment" (3.a linha, a mesma posicao que o verificador
+      // minisign do Rust le e cuja assinatura global confere). A 1.a linha
+      // ("untrusted comment") NAO e assinada: procurar no texto todo deixava
+      // um atacante escrever la o nome com a versao nova.
+      const forThisVersion = (s) => {
+        let lines;
+        try { lines = atob(s).split("\n").map((l) => l.replace(/\r$/, "")); } catch { return false; }
+        const trusted = lines[2] || "";
+        if (!trusted.startsWith("trusted comment: ")) return false;
+        const file = /(?:^|\t)file:([^\t]*)/.exec(trusted.slice("trusted comment: ".length));
+        return !!file && file[1].endsWith(`_${update.version}_x64-setup.exe`);
+      };
+      if (!sigs.length || !sigs.every(forThisVersion)) {
+        console.warn("update ignored: signature is not for version", update.version);
+        return;
+      }
+    }
     if (update && (update.available ?? true)) {
       _pendingUpdate = update;
       els.updateText.textContent = `Version ${update.version} is available.`;
@@ -201,6 +229,11 @@ async function checkForUpdates() {
 // Baixa, instala e reinicia o app.
 async function doUpdate() {
   if (!_pendingUpdate) return;
+  // Instalar reinicia o app: matava o upload a meio, sem abort no R2.
+  if (state.uploading) {
+    els.updateText.textContent = "Finish the upload first, then update.";
+    return;
+  }
   els.updateBtn.disabled = true;
   els.updateDismiss.disabled = true;
   els.updateText.textContent = "Downloading update…";
@@ -267,6 +300,15 @@ async function loadProfile() {
 // Conta com 2FA: depois da senha, o mesmo formulario pede o codigo de 6 digitos.
 let pendingMfa = null;
 
+// Volta ao passo da senha (outra conta, ou o token da 1.a etapa expirou).
+function resetMfa() {
+  if (!pendingMfa) return;
+  pendingMfa = null;
+  els.loginCode.classList.add("hidden");
+  els.loginCode.value = "";
+  els.loginBtn.textContent = "Log in";
+}
+
 async function onLogin() {
   const email = els.loginEmail.value.trim();
   const password = els.loginPassword.value;
@@ -293,12 +335,21 @@ async function onLogin() {
       return;
     }
     pendingMfa = null;
+    // A senha nao fica no DOM: depois do logout, um clique em "Log in"
+    // voltava a entrar na conta.
+    els.loginPassword.value = "";
     els.loginCode?.classList.add("hidden");
     state.session = r;
     setAccountUI();
     enterApp();
   } catch (err) {
     els.loginError.textContent = err.message || "Login failed.";
+    // O /challenge recusou o token da 1.a etapa (expirou): sem isto todas as
+    // tentativas seguintes falhavam ate reiniciar o app.
+    if (err.mfaStepExpired) {
+      resetMfa();
+      els.loginError.textContent = "The sign-in step expired — enter your password again.";
+    }
   } finally {
     els.loginBtn.disabled = false;
     els.loginBtn.textContent = pendingMfa ? "Verify code" : "Log in";
@@ -321,7 +372,6 @@ function fillSettings() {
   els.defDawVersion.value = d.daw_version || "";
   els.defPlugins.value = d.plugins || "";
   els.defHardware.value = d.hardware || "";
-  els.defPrice.value = d.default_price || 300;
   els.defGenre.value = d.default_genre || "";
   els.defProjectSale.checked = !!d.default_project_for_sale;
   els.defCustomize.checked = !!d.default_customization;
@@ -336,14 +386,13 @@ function onSettingsSave() {
     daw_version: els.defDawVersion.value.trim(),
     plugins: els.defPlugins.value.trim(),
     hardware: els.defHardware.value.trim(),
-    default_price: parseFloat(els.defPrice.value) || 300,
     default_genre: els.defGenre.value,
     default_project_for_sale: els.defProjectSale.checked,
     default_customization: els.defCustomize.checked,
     default_customization_price: parseInt(els.defCustomizePrice.value, 10) || 50,
   };
   saveDefaults(state.defaults);
-  show(els.dropzone);
+  show(settingsPrevSection || els.dropzone);
 }
 
 // ---- Last folder -----------------------------------------------------------
@@ -358,7 +407,7 @@ function setLastFolderUI() {
 
 function saveLastFolder(folder) {
   if (!folder) return;
-  localStorage.setItem(LAST_FOLDER_KEY, folder);
+  try { localStorage.setItem(LAST_FOLDER_KEY, folder); } catch {}
   state.lastFolder = folder;
   setLastFolderUI();
 }
@@ -469,7 +518,9 @@ async function convertMasters(scan, run) {
     }
     const failed = results.filter((r) => !r.ok);
     if (failed.length) {
-      warnLine(`⚠ MP3 conversion failed for ${failed.map((r) => r.label).join(", ")} — the upload will continue without them.`);
+      warnLine(
+        `⚠ MP3 conversion failed for ${failed.map((r) => `${r.label} (${r.error || "unknown error"})`).join(", ")} — Continue tries again; if it keeps failing, close the program using the file or wait for the copy/OneDrive, then Rescan.`
+      );
     }
   } catch (err) {
     if (run !== scanRun) return;
@@ -488,6 +539,10 @@ function applyScan(result, run) {
   // O "Continue" fica desabilitado ate BPM/key, MP3s e QC terminarem — senao
   // o upload saia sem BPM/key, sem os MP3s, ou antes do produtor ver o QC.
   els.continueBtn.disabled = true;
+  // O resultado anterior (com o seu Retry) ja nao corresponde a esta ronda: o
+  // Retry ativo arrancava o upload sem os MP3s nem o BPM/key ainda a calcular.
+  els.continueResult.classList.add("hidden");
+  els.continueResult.innerHTML = "";
   els.continueStatus.textContent = "Analyzing files…";
   els.continueStatus.classList.add("is-busy");
   const master = result.files.find((f) => f.category === "extended_mix");
@@ -541,7 +596,6 @@ function onSlotChange(file, category) {
   if (state.draftId) {
     state.draftId = null;
     state.uploadedFields = new Set();
-    els.continueResult.classList.add("hidden");
     els.uploadProgress.classList.add("hidden");
   }
 
@@ -551,7 +605,9 @@ function onSlotChange(file, category) {
 // ---- Scan (Fase 2) ---------------------------------------------------------
 async function handleDrop(paths) {
   if (!paths || paths.length === 0) return;
-  if (state.uploading) return; // upload em curso: nao troca de track no meio
+  // Upload em curso: nao troca de track no meio, mas volta a mostra-lo (o
+  // return silencioso deixava o produtor na dropzone sem saber de nada).
+  if (state.uploading) { show(els.results); return; }
   const folder = paths[0];
   const run = ++scanRun; // invalida analise/conversao da rodada anterior
 
@@ -643,10 +699,15 @@ function onFileProgress(p) {
   if (p.percent >= 100) r.row.classList.add("up-row--done");
 }
 
+// Durante o upload tambem trava o que o deixava a correr as escondidas
+// (Change folder, Log out) e o dropdown de slot, cuja escolha era ignorada.
 function showCancel(show) {
   els.cancelBtn.classList.toggle("hidden", !show);
   els.cancelBtn.disabled = false;
   els.cancelBtn.textContent = "Cancel";
+  els.resetBtn.disabled = show;
+  els.logoutBtn.disabled = show;
+  document.querySelectorAll(".slot-picker").forEach((s) => (s.disabled = show));
 }
 
 // Pede o cancelamento: o loop de arquivos para no proximo, e o Rust aborta o
@@ -669,16 +730,47 @@ function continueError(msg) {
   els.continueResult.appendChild(retry);
 }
 
+// Um Continue/Retry de cada vez. O state.uploading so liga depois dos await
+// iniciais (stat, conversoes, token): um duplo clique nesse intervalo criava
+// dois rascunhos e dois uploads em paralelo.
+let continueBusy = false;
 async function onContinue() {
-  if (!state.scan || state.uploading) return; // evita upload duplo (clique duplo)
+  if (continueBusy) return;
+  continueBusy = true;
+  try {
+    await runContinue();
+  } finally {
+    continueBusy = false;
+  }
+}
+
+async function runContinue() {
+  if (!state.scan || state.uploading) return;
   const d = state.defaults;
   const a = state.analysis;
+
+  // MP3 que falhou por um erro passageiro (ficheiro preso pelo OneDrive ou
+  // ainda a copiar) ficava perdido ate a um Rescan: tenta outra vez agora.
+  const bad = state.converted.filter((c) => !c.ok);
+  if (bad.length) {
+    els.continueStatus.textContent = "Converting MP3s again…";
+    try {
+      const again = await invoke("convert_masters", {
+        masters: bad.map((c) => ({ path: c.source, field: c.field, out_name: c.out_name, label: c.label })),
+      });
+      state.converted = state.converted.filter((c) => c.ok).concat(again);
+    } catch (e) {
+      console.warn("convert_masters retry failed:", e);
+    }
+    els.continueStatus.textContent = "";
+  }
 
   const files = buildUploadFiles();
   if (!files.some((f) => f.field === "file")) {
     continueError("Missing the Extended Mix master file.");
     return;
   }
+  if (await filesChangedSinceScan()) return;
 
   // Metadata que o app ja conhece (o resto o produtor preenche no site).
   // "Project file for sale" e a preferencia do produtor (Settings); pre-preenche
@@ -688,8 +780,10 @@ async function onContinue() {
     os: d.os,
     daw: d.daw,
     daw_version: d.daw_version,
-    plugins: d.plugins,
-    hardware: d.hardware,
+    // Teto: o draft-create recusa metadata > 20000 ("Metadata too large."),
+    // sem dizer que a causa e o texto das Settings, e o Retry repetia o erro.
+    plugins: (d.plugins || "").slice(0, 2000),
+    hardware: (d.hardware || "").slice(0, 2000),
     // Padrao de personalizacao (Settings) → pre-preenche o chkCustomize do site.
     customization: {
       enabled: !!d.default_customization,
@@ -703,7 +797,6 @@ async function onContinue() {
     ["bpm", a?.bpm ? String(a.bpm) : ""],
     ["music_key", a?.keyName || ""],
     ["daw", `${d.daw} ${d.daw_version}`.trim()],
-    ["price_eur", String(d.default_price || 300)],
     ["has_project_file", String(hasProject)],
     ["metadata", JSON.stringify(metadata)],
   ];
@@ -738,6 +831,7 @@ async function onContinue() {
 
     // Retry depois de falha parcial: reusa o rascunho ja criado em vez de
     // criar outro (evita rascunhos duplicados no site).
+    const failed = [];
     let draftId = state.draftId;
     if (!draftId) {
       const res = await invoke("create_draft", { payload: { token, fields, files: base } });
@@ -749,12 +843,15 @@ async function onContinue() {
       }
       draftId = res.id;
       state.draftId = draftId;
-      for (const f of base) state.uploadedFields.add(f.field);
+      // Avisos do draft-create (capa > 8MB, formato invalido): o servidor
+      // nao guardou a capa. Antes eram descartados e a capa dava-se como enviada.
+      const warnings = res.warnings || [];
+      failed.push(...warnings);
+      if (!warnings.length) for (const f of base) state.uploadedFields.add(f.field);
     }
     // Marca como concluidas as barras do que ja subiu (base ou retry).
     for (const field of state.uploadedFields) onFileProgress({ field, percent: 100 });
 
-    const failed = [];
     for (const f of extras) {
       if (state.cancelRequested) break;
       if (state.uploadedFields.has(f.field)) continue; // ja subiu num retry anterior
@@ -777,7 +874,15 @@ async function onContinue() {
       return;
     }
 
-    // Abre a pagina de upload do site com auto-login (token no hash) + draft id.
+    // Falhas: nada de "✅" nem de abrir o browser num rascunho sem o master.
+    // O Retry retoma o mesmo rascunho e salta o que ja subiu.
+    if (failed.length) {
+      els.continueStatus.textContent = "";
+      els.continueBtn.disabled = false;
+      renderContinuePartial(failed, draftId);
+      return;
+    }
+
     const url = await uploadPageUrl(draftId);
     let opened = true;
     try { await openExternal(url); } catch (e) { opened = false; console.warn("open failed:", e); }
@@ -829,6 +934,62 @@ function renderContinueSuccess(res, draftId, opened) {
   }
 }
 
+// Upload com ficheiros falhados: Retry retoma o rascunho (so sobe o que
+// falhou); o botao do site fica para quem preferir terminar la a mao.
+function renderContinuePartial(failed, draftId) {
+  els.continueResult.classList.remove("hidden");
+  els.continueResult.className = "publish-result publish-result--error";
+  els.continueResult.innerHTML = "";
+  els.continueResult.appendChild(el("h3", "publish-result__title", "⚠ Some files were not uploaded"));
+  els.continueResult.appendChild(
+    el("p", "publish-result__msg", "Retry uploads only what failed, to the same draft. Or open the upload page and add them there.")
+  );
+  for (const w of failed) els.continueResult.appendChild(el("div", "warn-line", w));
+  const retry = el("button", "btn btn--primary btn--sm", "Retry failed files");
+  retry.addEventListener("click", onContinue);
+  els.continueResult.appendChild(retry);
+  const open = el("button", "btn btn--ghost btn--sm", "Open upload page");
+  open.addEventListener("click", () =>
+    uploadPageUrl(draftId).then(openExternal).catch((e) => console.warn("open failed:", e)));
+  els.continueResult.appendChild(open);
+}
+
+// Algum ficheiro a enviar mudou depois do scan (re-export do DAW, apagado)?
+// O MP3, o BPM/key e o QC vinham do ficheiro antigo. Mostra o erro e devolve true.
+async function filesChangedSinceScan() {
+  const byPath = new Map(state.scan.files.map((f) => [f.path, f]));
+  const sources = new Set([
+    ...state.scan.files.filter((f) => f.upload_field).map((f) => f.path),
+    ...state.converted.filter((c) => c.ok).map((c) => c.source),
+  ]);
+  const paths = [...sources].filter((p) => byPath.get(p)?.modified);
+  let stats;
+  try {
+    stats = await invoke("stat_files", { paths });
+  } catch (e) {
+    console.warn("stat_files failed:", e);
+    return false; // sem verificacao, segue como antes
+  }
+  const changed = paths.filter((p, i) => {
+    const s = stats[i];
+    const f = byPath.get(p);
+    return !s || s[0] !== f.size || s[1] !== f.modified;
+  });
+  if (!changed.length) return false;
+
+  els.continueResult.classList.remove("hidden");
+  els.continueResult.className = "publish-result publish-result--error";
+  els.continueResult.innerHTML = "";
+  els.continueResult.appendChild(el("h3", "publish-result__title", "⚠ Files changed since the scan"));
+  els.continueResult.appendChild(
+    el("p", "publish-result__msg", `${changed.map((p) => byPath.get(p).filename).join(", ")} changed or disappeared. Rescan the folder so the MP3s, BPM/key and audio check match the files you upload.`)
+  );
+  const rescan = el("button", "btn btn--primary btn--sm", "Rescan");
+  rescan.addEventListener("click", () => handleDrop([state.scan.folder]));
+  els.continueResult.appendChild(rescan);
+  return true;
+}
+
 function onUploadProgress(p) {
   els.continueStatus.textContent = p.message || "";
 }
@@ -874,16 +1035,37 @@ async function wireDragDrop() {
 
 window.addEventListener("DOMContentLoaded", async () => {
   cacheEls();
-  state.lastFolder = localStorage.getItem(LAST_FOLDER_KEY) || "";
+  // localStorage pode lancar (perfil do WebView2 corrompido/sem espaco): e so
+  // uma conveniencia, nao pode parar o arranque.
+  try { state.lastFolder = localStorage.getItem(LAST_FOLDER_KEY) || ""; } catch {}
 
   // Auth (form: Enter submete a partir de qualquer campo)
   els.loginForm.addEventListener("submit", (e) => { e.preventDefault(); onLogin(); });
+  // Mudar email/senha no passo do codigo = outra tentativa de login.
+  els.loginEmail.addEventListener("input", resetMfa);
+  els.loginPassword.addEventListener("input", resetMfa);
+  // F5/Ctrl+R a meio do upload perdia o ciclo de envio sem aviso.
+  window.addEventListener("beforeunload", (e) => {
+    if (state.uploading) { e.preventDefault(); e.returnValue = ""; }
+  });
   els.logoutBtn.addEventListener("click", onLogout);
   // Settings
-  els.settingsBtn.addEventListener("click", () => { fillSettings(); show(els.settings); });
-  els.settingsClose.addEventListener("click", () => show(els.dropzone));
+  // Settings volta a secao de onde veio (antes ia sempre para a dropzone, e um
+  // upload em curso ficava sem forma de voltar a ser visto).
+  els.settingsBtn.addEventListener("click", () => {
+    const cur = currentSection();
+    if (cur !== els.settings) settingsPrevSection = cur;
+    fillSettings();
+    show(els.settings);
+  });
+  els.settingsClose.addEventListener("click", () => show(settingsPrevSection || els.dropzone));
 
-  els.guideBtn.addEventListener("click", () => { guidePrevSection = currentSection(); show(els.guide); });
+  // Com o Guide ja aberto, currentSection() nao o ve e devolvia a dropzone:
+  // o Done ia parar la (no ecra de login, sem forma de entrar).
+  els.guideBtn.addEventListener("click", () => {
+    if (els.guide.classList.contains("hidden")) guidePrevSection = currentSection();
+    show(els.guide);
+  });
   els.guideClose.addEventListener("click", () => show(guidePrevSection || els.dropzone));
   els.settingsSave.addEventListener("click", onSettingsSave);
   // Results
@@ -896,6 +1078,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Auto-update
   els.updateBtn.addEventListener("click", doUpdate);
   els.updateDismiss.addEventListener("click", () => els.updateBar.classList.add("hidden"));
+  // Fechar a janela a meio do upload matava-o sem aviso (partes no R2,
+  // rascunho a meio). Precisa de core:window:allow-destroy na capability.
+  window.__TAURI__.window.getCurrentWindow().onCloseRequested((e) => {
+    if (state.uploading && !confirm("An upload is in progress. Quit anyway?")) e.preventDefault();
+  });
 
   healthcheck();
   checkForUpdates();
@@ -928,7 +1115,20 @@ window.addEventListener("DOMContentLoaded", async () => {
       enterApp();
     } catch (err) {
       console.warn("session refresh failed:", err);
-      show(els.login);
+      // So o Supabase a recusar o refresh (4xx, menos o rate limit 429) quer
+      // dizer sessao terminada. Sem rede ou com 5xx a sessao continua boa:
+      // entra, e a proxima acao renova. Antes qualquer falha pedia login.
+      const revoked = err.status >= 400 && err.status < 500 && err.status !== 429;
+      if (revoked) clearSession();
+      // !currentSession(): um logout ganhou a corrida ao refresh.
+      if (revoked || !currentSession()) {
+        state.session = null;
+        setAccountUI();
+        if (revoked) els.loginError.textContent = "Your session ended — log in again.";
+        show(els.login);
+      } else {
+        enterApp();
+      }
     }
   } else {
     show(els.login);

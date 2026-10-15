@@ -42,23 +42,51 @@ export async function loadSession() {
 }
 
 export function clearSession() {
+  const s = _session;
   _session = null;
   invoke("clear_auth").catch((e) => console.warn("clear_auth failed:", e));
+  if (s?.accessToken) revoke(s).catch(() => {}); // best-effort
+}
+
+// Logout tambem no servidor: so apagar o ficheiro deixava o refresh token
+// valido. Sem getValidToken(): o refresh dele faz persist() e ressuscitava
+// a sessao acabada de apagar. scope=local: so esta sessao.
+async function revoke(s) {
+  let token = s.accessToken;
+  if (s.expiresAt && s.expiresAt - Math.floor(Date.now() / 1000) < 30 && s.refreshToken) {
+    token = (await tokenRequest("refresh_token", { refresh_token: s.refreshToken })).accessToken;
+  }
+  await fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}` },
+  });
 }
 
 function toSession(data) {
   return {
     accessToken: data.access_token,
     refreshToken: data.refresh_token,
-    // epoch seconds; o verify do 2FA devolve so expires_in
-    expiresAt: data.expires_at || (data.expires_in ? Math.floor(Date.now() / 1000) + data.expires_in : 0),
+    // epoch seconds no relogio LOCAL: o expires_at do servidor, comparado
+    // com um relogio do PC adiantado/atrasado, dava tokens "expirados" (refresh
+    // a cada chamada) ou usados ja expirados. O verify do 2FA so traz expires_in.
+    expiresAt: data.expires_in ? Math.floor(Date.now() / 1000) + data.expires_in : (data.expires_at || 0),
     email: data.user?.email || _session?.email || "",
   };
 }
 
+// fetch com mensagem legivel quando nao ha rede (chegava "Failed to fetch"
+// ao ecra de login). Sem status: quem chama trata-o como erro de rede.
+async function netFetch(url, opts) {
+  try {
+    return await fetch(url, opts);
+  } catch {
+    throw new Error("Can't reach the GPW login server — check your internet connection.");
+  }
+}
+
 // Pedido autenticado a /auth/v1 (usado no 2FA, com o token da 1.a etapa).
 async function authPost(path, accessToken, body) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1${path}`, {
+  const res = await netFetch(`${SUPABASE_URL}/auth/v1${path}`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -68,12 +96,14 @@ async function authPost(path, accessToken, body) {
     body: JSON.stringify(body || {}),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error_description || data.msg || data.message || "Verification failed.");
+  if (!res.ok) {
+    throw Object.assign(new Error(data.error_description || data.msg || data.message || "Verification failed."), { status: res.status });
+  }
   return data;
 }
 
 async function tokenRequest(grant, body, { raw = false } = {}) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=${grant}`, {
+  const res = await netFetch(`${SUPABASE_URL}/auth/v1/token?grant_type=${grant}`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -84,8 +114,9 @@ async function tokenRequest(grant, body, { raw = false } = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msg =
-      data.error_description || data.msg || data.error || "Login failed.";
-    throw new Error(msg);
+      data.error_description || data.msg || data.message || data.error || `Login failed (HTTP ${res.status}).`;
+    // status: quem chama distingue "sessao terminou" (4xx) de rede/5xx.
+    throw Object.assign(new Error(msg), { status: res.status });
   }
   return raw ? data : toSession(data);
 }
@@ -105,7 +136,12 @@ export async function login(email, password) {
 
 /// 2.a etapa do login com 2FA: codigo de 6 digitos da app de autenticacao.
 export async function verifyMfa(mfa, code) {
-  const ch = await authPost(`/factors/${mfa.factorId}/challenge`, mfa.token, {});
+  const ch = await authPost(`/factors/${mfa.factorId}/challenge`, mfa.token, {}).catch((e) => {
+    // O challenge so falha com o token da 1.a etapa invalido/expirado (um
+    // codigo errado falha no /verify, e esse pode tentar-se outra vez).
+    if (e.status) e.mfaStepExpired = true;
+    throw e;
+  });
   const data = await authPost(`/factors/${mfa.factorId}/verify`, mfa.token, { challenge_id: ch.id, code });
   const session = toSession({ ...data, user: data.user || { email: mfa.email } });
   await persist(session);
@@ -117,6 +153,9 @@ async function refresh(refreshToken) {
   const session = await tokenRequest("refresh_token", {
     refresh_token: refreshToken,
   });
+  // Logout (ou login noutra conta) durante o refresh: gravar agora
+  // ressuscitava a sessao antiga por cima.
+  if (_session?.refreshToken !== refreshToken) throw new Error("Not logged in.");
   await persist(session);
   return session;
 }
