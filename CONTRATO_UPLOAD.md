@@ -7,8 +7,9 @@ de tamanho vivem no site, em `lib/upload-exts.js` (`FILE_LABELS`,
 `allowedExts`, `maxBytesFor`) — não copiar a tabela para aqui, diverge.
 
 1. **`POST /api/app/draft-create`** — `multipart/form-data` com os campos de
-   texto (`genre`, `bpm`, `music_key`, `daw`, `price_eur`, `has_project_file`,
-   `metadata` em JSON) e a capa (`cover`, até 8MB). Responde `{ success, id,
+   texto (`genre`, `bpm`, `music_key`, `daw`, `has_project_file`, `metadata`
+   em JSON) e a capa (`cover`, até 8MB). O preço não vai: num rascunho o site
+   pede-o ao produtor, track a track. Responde `{ success, id,
    warnings[] }`; o rascunho fica com `status = draft`.
 2. Para cada ficheiro (master e extras), um de cada vez:
    - **`POST /api/app/draft-file-url`** `{ draft_id, fkey, filename }` — só

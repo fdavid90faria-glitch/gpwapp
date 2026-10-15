@@ -106,7 +106,6 @@ function cacheEls() {
   els.defDawVersion = id("def-daw-version");
   els.defPlugins = id("def-plugins");
   els.defHardware = id("def-hardware");
-  els.defPrice = id("def-price");
   els.defGenre = id("def-genre");
   els.defProjectSale = id("def-project-sale");
   els.defCustomize = id("def-customize");
@@ -373,7 +372,6 @@ function fillSettings() {
   els.defDawVersion.value = d.daw_version || "";
   els.defPlugins.value = d.plugins || "";
   els.defHardware.value = d.hardware || "";
-  els.defPrice.value = d.default_price || 300;
   els.defGenre.value = d.default_genre || "";
   els.defProjectSale.checked = !!d.default_project_for_sale;
   els.defCustomize.checked = !!d.default_customization;
@@ -388,7 +386,6 @@ function onSettingsSave() {
     daw_version: els.defDawVersion.value.trim(),
     plugins: els.defPlugins.value.trim(),
     hardware: els.defHardware.value.trim(),
-    default_price: parseFloat(els.defPrice.value) || 300,
     default_genre: els.defGenre.value,
     default_project_for_sale: els.defProjectSale.checked,
     default_customization: els.defCustomize.checked,
@@ -800,7 +797,6 @@ async function runContinue() {
     ["bpm", a?.bpm ? String(a.bpm) : ""],
     ["music_key", a?.keyName || ""],
     ["daw", `${d.daw} ${d.daw_version}`.trim()],
-    ["price_eur", String(d.default_price || 300)],
     ["has_project_file", String(hasProject)],
     ["metadata", JSON.stringify(metadata)],
   ];

@@ -28,7 +28,6 @@ const FALLBACK_DEFAULTS = {
   daw_version: "",
   plugins: "",
   hardware: "",
-  default_price: 300,
   default_genre: "",
   default_project_for_sale: false,
   default_customization: false,
