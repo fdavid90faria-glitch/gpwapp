@@ -194,6 +194,7 @@ function slotPicker(f, slots, onChange) {
   const sel = document.createElement("select");
   sel.className = "tag tag--field slot-picker";
   sel.title = "Which slot this file is uploaded to";
+  sel.setAttribute("aria-label", `Slot for ${f.filename}`);
   for (const s of slots) {
     const opt = document.createElement("option");
     opt.value = s.category;

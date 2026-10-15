@@ -43,9 +43,9 @@
           <p class="login__sub">Same account you use on ghostproducerworld.com</p>
           <input id="login-email" class="input" type="email" autocomplete="username" placeholder="Email" />
           <input id="login-password" class="input" type="password" autocomplete="current-password" placeholder="Password" />
-          <input id="login-code" class="input hidden" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code" />
+          <input id="login-code" class="input hidden" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" />
           <button id="login-btn" class="btn btn--primary btn--block" type="submit">Log in</button>
-          <div id="login-error" class="login__error"></div>
+          <div id="login-error" class="login__error" role="alert"></div>
         </form>
       </section>
 
@@ -59,7 +59,7 @@
         <div class="review__grid">
           <div class="review__col">
             <div class="field">
-              <label class="field__label">Operating system</label>
+              <label class="field__label" for="def-os">Operating system</label>
               <select id="def-os" class="input">
                 <option value="">Select OS</option>
                 <option>Windows</option>
@@ -67,7 +67,7 @@
               </select>
             </div>
             <div class="field">
-              <label class="field__label">DAW</label>
+              <label class="field__label" for="def-daw">DAW</label>
               <select id="def-daw" class="input">
                 <option value="">Select DAW</option>
                 <option>Ableton Live</option>
@@ -81,14 +81,13 @@
                 <option>Reason</option>
               </select>
             </div>
-            <div class="field"><label class="field__label">DAW version</label><input id="def-daw-version" class="input" type="text" placeholder="21.2" /></div>
+            <div class="field"><label class="field__label" for="def-daw-version">DAW version</label><input id="def-daw-version" class="input" type="text" placeholder="21.2" /></div>
           </div>
           <div class="review__col">
-            <div class="field"><label class="field__label">Plugins</label><input id="def-plugins" class="input" type="text" placeholder="Serum, Diva, FabFilter" /></div>
-            <div class="field"><label class="field__label">Hardware</label><input id="def-hardware" class="input" type="text" placeholder="(optional)" /></div>
-            <div class="field"><label class="field__label">Default price (USD)</label><input id="def-price" class="input" type="number" min="100" max="2000" step="50" placeholder="300" /></div>
+            <div class="field"><label class="field__label" for="def-plugins">Plugins</label><input id="def-plugins" class="input" type="text" maxlength="2000" placeholder="Serum, Diva, FabFilter" /></div>
+            <div class="field"><label class="field__label" for="def-hardware">Hardware</label><input id="def-hardware" class="input" type="text" maxlength="2000" placeholder="(optional)" /></div>
             <div class="field">
-              <label class="field__label">Default genre</label>
+              <label class="field__label" for="def-genre">Default genre</label>
               <select id="def-genre" class="input"></select>
             </div>
             <div class="field">
@@ -110,7 +109,7 @@
               </label>
             </div>
             <div class="field">
-              <label class="field__label">Customization price (USD)</label>
+              <label class="field__label" for="def-customize-price">Customization price (USD)</label>
               <select id="def-customize-price" class="input">
                 <option value="50">50</option>
                 <option value="100">100</option>
@@ -168,7 +167,7 @@
               <span id="an-camelot" class="metric__val">—</span>
             </div>
           </div>
-          <div id="an-status" class="analysis__status"></div>
+          <div id="an-status" class="analysis__status" aria-live="polite"></div>
         </div>
 
         <div id="conversion" class="conversion hidden">
@@ -184,7 +183,7 @@
             Continue upload →
           </button>
           <button id="cancel-btn" class="btn btn--ghost hidden" type="button">Cancel</button>
-          <span id="continue-status" class="publish__status"></span>
+          <span id="continue-status" class="publish__status" aria-live="polite"></span>
         </div>
         <p class="results__note">
           We'll upload the files and open the GPW upload page in your browser with
@@ -193,7 +192,7 @@
 
         <div id="upload-progress" class="up-progress hidden"></div>
 
-        <div id="continue-result" class="publish-result hidden"></div>
+        <div id="continue-result" class="publish-result hidden" aria-live="polite"></div>
       </section>
 
       <!-- GUIA: como preparar a pasta (igual à secção do site) -->

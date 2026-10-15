@@ -187,9 +187,16 @@ async fn post_json(
     body: serde_json::Value,
 ) -> Result<serde_json::Value, ApiError> {
     let url = format!("{}{}", APP_BASE_URL, path);
+    // Limpeza e registo correm MESMO depois do Cancel: com o check abaixo o
+    // abort saia sem ir a rede (partes ficavam no R2) e o commit de um ficheiro
+    // ja completo era saltado (objeto orfao, e o Retry subia-o outra vez).
+    // Depois do Cancel tentam pouco, para o Cancel nao ficar 90 s a espera.
+    let must_finish = path == "/api/app/draft-file-commit"
+        || body.get("action").and_then(|a| a.as_str()) == Some("abort");
+    let attempts = if must_finish && is_cancelled(app) { 3 } else { CONTROL_ATTEMPTS };
     let mut last = ApiError { status: 0, message: String::new() };
-    for attempt in 1..=CONTROL_ATTEMPTS {
-        if is_cancelled(app) {
+    for attempt in 1..=attempts {
+        if !must_finish && is_cancelled(app) {
             return Err(cancelled());
         }
         let tok = fresh_token(app, token).await;
@@ -227,8 +234,12 @@ async fn post_json(
                 last = ApiError { status: 0, message: format!("Falha de rede: {}", e) };
             }
         }
-        if attempt < CONTROL_ATTEMPTS {
-            sleep_backoff(app, attempt).await;
+        if attempt < attempts {
+            if must_finish {
+                tokio::time::sleep(backoff(attempt)).await;
+            } else {
+                sleep_backoff(app, attempt).await;
+            }
         }
     }
     Err(last)
@@ -282,6 +293,32 @@ async fn open_range(
 /// Corpo de UM pedaco: le so o intervalo [offset, offset+len) do ficheiro, em
 /// streaming. O progresso emitido e o do FICHEIRO inteiro (offset + enviados),
 /// senao a barra saltava para 0% a cada pedaco novo.
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Erro ao LER o ficheiro local durante o envio (OneDrive offline, disco
+/// externo desligado). Marcado na origem para nao aparecer como "Falha de rede".
+#[derive(Debug)]
+struct LocalRead(std::io::Error);
+impl std::fmt::Display for LocalRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for LocalRead {}
+
+/// Mensagem de um erro do reqwest num envio de ficheiro: a causa local se a
+/// houver; senao rede, sem o URL (o do R2 e pre-assinado e ia parar a UI).
+fn send_error(filename: &str, e: reqwest::Error) -> String {
+    let mut src = std::error::Error::source(&e);
+    while let Some(s) = src {
+        if let Some(local) = s.downcast_ref::<LocalRead>() {
+            return format!("{}: could not read the file ({}) — check OneDrive/the drive and retry.", filename, local);
+        }
+        src = s.source();
+    }
+    format!("Falha de rede no upload: {}", e.without_url())
+}
+
 async fn part_body(
     app: &AppHandle,
     uf: &UploadFile,
@@ -299,12 +336,12 @@ async fn part_body(
     let filename = uf.filename.clone();
     let mut sent: u64 = 0;
     let mut last_pct: u64 = u64::MAX;
-    let stream = ReaderStream::new(limited).map(move |chunk| {
+    let stream = ReaderStream::new(limited).map(move |chunk| -> Result<_, BoxError> {
         if cancel.load(Ordering::Relaxed) {
-            return Err(std::io::Error::new(
+            return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "upload cancelled",
-            ));
+            )));
         }
         if let Ok(ref bytes) = chunk {
             sent += bytes.len() as u64;
@@ -324,7 +361,7 @@ async fn part_body(
                 );
             }
         }
-        chunk
+        chunk.map_err(|e| Box::new(LocalRead(e)) as BoxError)
     });
     Ok(reqwest::Body::wrap_stream(stream))
 }
@@ -419,7 +456,7 @@ async fn put_part(
                 if is_cancelled(app) {
                     return Err(cancelled());
                 }
-                last = ApiError { status: 0, message: format!("Falha de rede no upload: {}", e) };
+                last = ApiError { status: 0, message: send_error(&file.filename, e) };
             }
         }
         if attempt < PART_ATTEMPTS {
@@ -553,7 +590,13 @@ async fn put_in_parts(
         // faltar uma (PUT que respondeu 200 sem gravar), o objeto fica com um
         // buraco — e' aqui que se apanha, nao quando o comprador abre o ZIP.
         let joined = done.get("parts").and_then(|p| p.as_u64()).unwrap_or(0);
-        if joined != part_count(total) as u64 {
+        // Um complete repetido (o 1.o juntou, a resposta perdeu-se) volta com
+        // {already:true, parts:[]}: o objeto ja existe. Tratado como falha, o
+        // ficheiro ficava orfao e o produtor tinha de o reenviar inteiro.
+        // ponytail: nesse ramo nao ha contagem para conferir; o servidor teria
+        // de devolver o tamanho do objeto.
+        let already = done.get("already").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !already && joined != part_count(total) as u64 {
             return Err(ApiError {
                 status: 500,
                 message: format!("Upload em pedacos: o servidor juntou {} de {} pedacos.", joined, part_count(total)),
@@ -618,7 +661,7 @@ async fn send_once(
         .multipart(form)
         .send()
         .await
-        .map_err(|e| format!("Falha de rede no upload: {}", e))
+        .map_err(|e| send_error("cover", e))
 }
 
 /// Resultado da criacao de rascunho (Fase "continuar no site").
@@ -724,14 +767,31 @@ fn warnings_of(body: &serde_json::Value) -> Vec<String> {
 
 /// Cria um RASCUNHO no site (/api/app/draft-create): sobe os arquivos + dados
 /// conhecidos e devolve o id. O produtor finaliza abrindo upload.html?edit=<id>.
-pub async fn create_draft(app: AppHandle, payload: UploadPayload) -> Result<DraftResult, String> {
+pub async fn create_draft(app: AppHandle, mut payload: UploadPayload) -> Result<DraftResult, String> {
+    // Capa acima do teto do draft-create (8MB, que a ignora com um aviso) nao
+    // vai: acima de 100MB o proxy do Cloudflare recusava o pedido inteiro e o
+    // rascunho nem era criado.
+    const COVER_MAX: u64 = 8 * 1024 * 1024;
+    let mut skipped = Vec::new();
+    let mut kept = Vec::new();
+    for f in std::mem::take(&mut payload.files) {
+        let size = tokio::fs::metadata(&f.path).await.map(|m| m.len()).unwrap_or(0);
+        if f.field == "cover" && size > COVER_MAX {
+            skipped.push(format!("Cover: {} is larger than 8MB — skipped, add a smaller one on the site.", f.filename));
+        } else {
+            kept.push(f);
+        }
+    }
+    payload.files = kept;
+
     let client = prepare(&app, &payload.files).await?;
     let url = format!("{}/api/app/draft-create", APP_BASE_URL);
     let resp = post_with_retry(&app, &client, &url, &payload).await?;
 
     let status = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
-    let warnings = warnings_of(&body);
+    let mut warnings = skipped;
+    warnings.extend(warnings_of(&body));
 
     if status.is_success() && body.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
         let id = body
@@ -794,6 +854,12 @@ pub async fn add_file(
 
     // Teto do slot ANTES de gastar banda: o servidor tambem mede no fim, mas
     // descobrir isso depois de 80 min de upload nao ajuda ninguem.
+    // 0 bytes abria um multipart sem partes e o complete dava 500 repetido.
+    if file_size == 0 {
+        let msg = format!("{}: empty file (0 bytes) — export it again.", file.filename);
+        progress(&app, "error", msg.clone());
+        return Ok(DraftResult::fail(400, msg));
+    }
     if file_size > max_bytes_for(&fkey) {
         let msg = format!("{}: file too large (max {}).", file.filename, max_label_for(&fkey));
         progress(&app, "error", msg.clone());

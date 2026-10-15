@@ -25,6 +25,8 @@ const fmtFormat = (a) =>
 // regras de peak (mesma distincao do ANALYZER).
 function qcRole(f) {
   if (f.ext !== "wav") return null; // so WAV tem regra de formato/peak
+  // "Don't upload": nao sobe, nao conta no "files don't meet the GPW standard".
+  if (f.category === "not_uploaded") return null;
   if (f.category === "stems") return "stems";
   // Masters (versoes masterizadas, peak -0.3..0 dB): Extended Mix, Extended
   // Instrumental (Mix), Radio Mix e Radio Instrumental (Mix) — mesmo padrao,
@@ -93,17 +95,22 @@ function validate(role, a, watch) {
   if (silence) reasons.push(silence);
 
   const isWav24 = a.bit_depth === 24 && !a.is_float;
-  if (role !== "stems" && a.trailing_silence_secs > 3)
-    reasons.push(`${a.trailing_silence_secs.toFixed(1)}s of silence at the end (export bug?)`);
+  // Compara o MESMO valor que mostra (1 casa): com o bruto saia "-3.0 above
+  // the max -3" ou "3.0s of silence" para -2.96 / 3.04.
+  const r1 = (v) => (v == null ? null : Number(v.toFixed(1)));
+  const tail = r1(a.trailing_silence_secs);
+  if (role !== "stems" && tail > 3)
+    reasons.push(`${tail.toFixed(1)}s of silence at the end (export bug?)`);
 
   // 1 casa decimal para os limites serem inclusivos (-0.3000x conta como -0.3)
-  const p = a.sample_peak_db == null ? null : Math.round(a.sample_peak_db * 10) / 10;
+  const p = r1(a.sample_peak_db);
+  const st = r1(a.lufs_short_max);
   if (role === "master") {
     if (!isWav24) reasons.push(`Format: expected WAV 24-bit, found ${fmtFormat(a)}`);
     if (p == null || p > 0 || p < -0.3)
       reasons.push(`Peak ${fmtDb(p)} dB outside the -0.3 to 0 dB range`);
-    if (a.lufs_short_max != null && a.lufs_short_max > -3)
-      reasons.push(`LUFS Short-Term ${fmtDb(a.lufs_short_max)} above the max -3`);
+    if (st != null && st > -3)
+      reasons.push(`LUFS Short-Term ${fmtDb(st)} above the max -3`);
   } else {
     if (!isWav24) reasons.push(`Format: expected WAV 24-bit, found ${fmtFormat(a)}`);
     if (p != null && p > -3 && !a.is_silent)
@@ -282,6 +289,13 @@ export async function runQc(scan, isCurrent, warningsEl) {
         `"${x.file.filename}": possible vocals detected (${Math.round(x.analysis.vocal_confidence * 100)}% confidence) — no instrumental files in the folder. If the track has vocals, export the instrumental versions too.`
       );
   }
+
+  // Zip de stems que nao abriu (ainda a copiar, OneDrive offline, sem WAVs):
+  // sem isto o resumo dizia "✓ passed" sem ter visto stem nenhuma.
+  const stemsZip = scan.files.some((f) => f.ext === "zip" && f.category === "stems");
+  const zipStemsRead = scan.files.some((f) => f.category === "stems" && f.role === "skip");
+  if (stemsZip && !zipStemsRead)
+    cross.push("Stems .zip could not be opened for the audio check — make sure it finished copying and contains WAV files, then Rescan.");
 
   progress.remove();
   if (cross.length || failed) {

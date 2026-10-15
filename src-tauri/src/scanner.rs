@@ -294,12 +294,35 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
         }
 
         let ext = ext_of(&file_name);
-        let c = classify(&name_lower, &ext, in_stems_dir);
+        // Nome que o Windows guarda mas nao e Unicode valido (surrogate solto):
+        // o caminho "lossy" nao abria e falhava tarde, no QC e no upload.
+        let Some(path_s) = path.to_str().map(String::from) else {
+            out.push(ScannedFile {
+                filename: file_name.clone(),
+                path: String::new(),
+                ext,
+                size: 0,
+                modified: 0,
+                category: UNDEFINED.category.into(),
+                label: "Rename this file (invalid characters in the name)".into(),
+                role: UNDEFINED.role.into(),
+                upload_field: None,
+                is_master: false,
+            });
+            continue;
+        };
+        // A capa so vem da raiz da pasta: uma imagem qualquer numa subpasta
+        // (screenshot, artwork antigo) ganhava a capa por ordem do nome.
+        let c = if depth > 0 && matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+            UNDEFINED
+        } else {
+            classify(&name_lower, &ext, in_stems_dir)
+        };
         let md = entry.metadata().ok();
 
         out.push(ScannedFile {
             filename: file_name.clone(),
-            path: path.to_string_lossy().to_string(),
+            path: path_s.clone(),
             ext: ext.clone(),
             size: md.as_ref().map(|m| m.len()).unwrap_or(0),
             modified: md.as_ref().map(mtime_ms).unwrap_or(0),
@@ -316,7 +339,7 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
         // com o zip nem serem enviados. Falha na extracao e ignorada (o upload
         // do zip nao depende disto).
         if ext == "zip" && (is_stems_name(&name_lower) || in_stems_dir) {
-            if let Ok(wavs) = extract_wavs_from_zip(&path.to_string_lossy()) {
+            if let Ok(wavs) = extract_wavs_from_zip(&path_s) {
                 for w in wavs {
                     let wname = Path::new(&w)
                         .file_name()
@@ -361,6 +384,7 @@ fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
     fs::create_dir_all(&dest).map_err(|e| format!("temp dir: {}", e))?;
 
     let mut out = Vec::new();
+    let mut used = std::collections::HashSet::new();
     for i in 0..archive.len() {
         let mut entry = match archive.by_index(i) {
             Ok(e) => e,
@@ -370,7 +394,18 @@ fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
         if !ename.to_lowercase().ends_with(".wav") || is_mac_junk(&ename) {
             continue;
         }
-        let base = ename.rsplit(['/', '\\']).next().unwrap_or(&ename).to_string();
+        // Nomes validos no macOS mas nao no Windows (" ? * < > | :) eram
+        // descartados em silencio; o ':' ("C:x.wav") ainda saia da pasta temp.
+        let base: String = ename
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&ename)
+            .chars()
+            .map(|c| if c < ' ' || "<>:\"|?*".contains(c) { '_' } else { c })
+            .collect();
+        // Mesmo nome em subpastas diferentes ("Drums/FX.wav", "Synths/FX.wav"):
+        // o 2.o sobrescrevia o 1.o e a soma contava um deles duas vezes.
+        let base = if used.insert(base.to_lowercase()) { base } else { format!("{}_{}", i, base) };
         let target = dest.join(&base);
         let mut f = match fs::File::create(&target) {
             Ok(f) => f,
@@ -683,6 +718,33 @@ mod tests {
         // (2+ arquivos no mesmo campo) sao tratados na UI (dedupe + aviso).
         assert_eq!(cat("Track (Club Mix).wav"), "extended_mix");
         assert_eq!(cat("Track Remix.wav"), "extended_mix");
+    }
+
+    #[test]
+    fn extracao_nao_perde_nem_escapa_stems() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("gpw_zip_names_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("Stems.zip");
+        let mut zw = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        for (n, body) in [("Drums/FX.wav", "a"), ("Synths/FX.wav", "b"), ("Lead?.wav", "c"), ("C:Bass.wav", "d")] {
+            zw.start_file(n, opts).unwrap();
+            zw.write_all(body.as_bytes()).unwrap();
+        }
+        zw.finish().unwrap();
+
+        let wavs = extract_wavs_from_zip(&zip_path.to_string_lossy()).unwrap();
+        assert_eq!(wavs.len(), 4, "{:?}", wavs);
+        let unique: std::collections::HashSet<_> = wavs.iter().collect();
+        assert_eq!(unique.len(), 4, "dois stems no mesmo ficheiro: {:?}", wavs);
+        let root = stems_tmp_root();
+        assert!(wavs.iter().all(|w| Path::new(w).starts_with(&root)), "fora da pasta temp: {:?}", wavs);
+        let bodies: Vec<String> = wavs.iter().map(|w| fs::read_to_string(w).unwrap()).collect();
+        for b in ["a", "b", "c", "d"] {
+            assert!(bodies.iter().any(|x| x == b), "stem {} perdido", b);
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

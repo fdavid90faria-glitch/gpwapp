@@ -46,10 +46,19 @@
     return _worker
   }
 
+  // Motor que nao arranca (WASM falhou a inicializar) ou algoritmo preso: sem
+  // resposta, a promessa ficava pendente e o Continue desativado para sempre.
+  // O timeout reusa o caminho do onerror (rejeita tudo e recria o worker).
+  const TIMEOUT_MS = 120000
+
   function analyzeInWorker(pcm) {
     const id = ++_seq
     return new Promise((resolve, reject) => {
-      _pending.set(id, { resolve, reject })
+      const t = setTimeout(() => {
+        if (_pending.has(id) && _worker) _worker.onerror({ message: 'Analysis timed out.' })
+      }, TIMEOUT_MS)
+      const done = (fn) => (v) => { clearTimeout(t); fn(v) }
+      _pending.set(id, { resolve: done(resolve), reject: done(reject) })
       // pcm.buffer transferido (é uma cópia nossa): evita clonar ~16MB.
       getWorker().postMessage({ id, pcm }, [pcm.buffer])
     })

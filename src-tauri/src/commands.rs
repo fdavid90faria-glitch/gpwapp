@@ -24,12 +24,14 @@ pub struct PingResult {
 }
 
 /// Healthcheck simples chamado pelo frontend ao iniciar.
+/// A versao vem do tauri.conf.json (package_info), a mesma que o updater e o
+/// instalador usam — o CARGO_PKG_VERSION podia ficar para tras.
 #[tauri::command]
-pub fn ping() -> PingResult {
+pub fn ping(app: AppHandle) -> PingResult {
     PingResult {
         ok: true,
         message: "GPW Uploader backend ready".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: app.package_info().version.to_string(),
     }
 }
 
@@ -77,7 +79,15 @@ pub async fn read_file_bytes(path: String) -> Result<Response, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = match read_wav_head(&path, ANALYSIS_SECS) {
             Some(b) => b,
-            None => fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path, e))?,
+            None => {
+                // Fallback (RF64 e afins) lia o ficheiro INTEIRO, GBs pela memoria
+                // e pelo IPC. Acima do teto o JS mostra "enter BPM & key on the site".
+                let len = fs::metadata(&path).map_err(|e| format!("Failed to read {}: {}", path, e))?.len();
+                if len > 200_000_000 {
+                    return Err("Unsupported WAV for analysis (file too large to read whole)".into());
+                }
+                fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path, e))?
+            }
         };
         Ok(Response::new(bytes))
     })
@@ -172,7 +182,7 @@ pub async fn qc_stems_sum(paths: Vec<String>) -> Result<crate::qc::StemsSum, Str
         .map_err(|e| format!("QC sum task failed: {}", e))?
 }
 
-/// Converte os masters WAV->MP3 via FFmpeg sidecar (Fase 4). Emite
+/// Converte os masters WAV->MP3 via LAME sidecar (Fase 4). Emite
 /// "convert:progress" por arquivo e devolve os MP3 gerados.
 #[tauri::command]
 pub async fn convert_masters(
