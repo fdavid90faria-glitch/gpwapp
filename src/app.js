@@ -371,7 +371,7 @@ async function analyzeMaster(master, run) {
   els.anKey.textContent = "—";
   els.anCamelot.textContent = "—";
   els.anStatus.textContent = "🎧 Analyzing the Extended Mix… detecting BPM & key…";
-  els.anStatus.className = "analysis__status analysis__status--busy";
+  els.anStatus.className = "analysis__status analysis__status--busy is-busy";
 
   if (typeof window.GPW_analyzeAudio !== "function") {
     els.anStatus.textContent = "⚠ Analysis engine not loaded.";
@@ -452,15 +452,10 @@ async function convertMasters(scan, run) {
   state.converted = [];
   if (!masters.length) {
     els.conversion.classList.add("hidden");
-    // Sem conversao: libera o "Continue" se houver master.
-    els.continueBtn.disabled = !scan.has_extended_master;
     return;
   }
   els.conversion.classList.remove("hidden");
   renderConvRows(masters);
-  // Bloqueia o "Continue" ate a conversao terminar — senao os MP3s nao entram.
-  els.continueBtn.disabled = true;
-  els.continueStatus.textContent = "Converting MP3s…";
   try {
     const results = await invoke("convert_masters", { masters });
     if (run !== scanRun) return; // outra pasta foi escaneada entretanto
@@ -477,11 +472,6 @@ async function convertMasters(scan, run) {
     if (run !== scanRun) return;
     console.error("convert_masters falhou:", err);
     warnLine("⚠ MP3 conversion failed — the upload will continue without MP3s.");
-  } finally {
-    if (run === scanRun) {
-      els.continueStatus.textContent = "";
-      els.continueBtn.disabled = !scan.has_extended_master;
-    }
   }
 }
 
@@ -492,14 +482,24 @@ async function convertMasters(scan, run) {
 function applyScan(result, run) {
   renderScan(result, els, state.wavSlots, onSlotChange);
 
-  // O "Continue" fica desabilitado ate a conversao MP3 terminar
-  // (convertMasters libera no fim) — garante que os MP3s entrem no upload.
+  // O "Continue" fica desabilitado ate BPM/key, MP3s e QC terminarem — senao
+  // o upload saia sem BPM/key, sem os MP3s, ou antes do produtor ver o QC.
+  els.continueBtn.disabled = true;
+  els.continueStatus.textContent = "Analyzing files…";
+  els.continueStatus.classList.add("is-busy");
   const master = result.files.find((f) => f.category === "extended_mix");
-  if (master) analyzeMaster(master, run);
-  convertMasters(result, run);
-  runQc(result, () => run === scanRun, els.resultsWarnings).catch((e) =>
-    console.error("QC falhou:", e)
-  );
+  Promise.allSettled([
+    master && analyzeMaster(master, run),
+    convertMasters(result, run),
+    runQc(result, () => run === scanRun, els.resultsWarnings).catch((e) =>
+      console.error("QC falhou:", e)
+    ),
+  ]).then(() => {
+    if (run !== scanRun) return; // outra rodada assumiu o botao
+    els.continueStatus.textContent = "";
+    els.continueStatus.classList.remove("is-busy");
+    els.continueBtn.disabled = !result.has_extended_master;
+  });
 }
 
 // O produtor escolheu outro slot para um arquivo no dropdown da lista.
@@ -543,6 +543,7 @@ async function handleDrop(paths) {
   state.uploadedFields = new Set();
   els.continueBtn.disabled = true;
   els.continueStatus.textContent = "";
+  els.continueStatus.classList.remove("is-busy");
   els.continueResult.classList.add("hidden");
   els.continueResult.innerHTML = "";
   els.uploadProgress.classList.add("hidden");

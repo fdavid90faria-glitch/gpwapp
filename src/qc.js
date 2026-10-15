@@ -211,6 +211,16 @@ export async function runQc(scan, isCurrent, warningsEl) {
     .filter((x) => x.role);
   if (!items.length) return;
 
+  // Linha de progresso enquanto o QC corre (some no fim, da lugar ao resumo).
+  const progress = document.createElement("div");
+  progress.className = "warn-line is-busy";
+  let done = 0;
+  const tick = () => {
+    progress.textContent = `Checking audio… ${done}/${items.length} files`;
+  };
+  tick();
+  warningsEl.appendChild(progress);
+
   // pool de 2 (cada analise ja usa uma thread no Rust; disco e o gargalo)
   const queue = [...items];
   const worker = async () => {
@@ -223,6 +233,8 @@ export async function runQc(scan, isCurrent, warningsEl) {
         x.verdict = { level: "fail", reasons: [`Could not analyze: ${e}`] };
       }
       if (!isCurrent()) return;
+      done++;
+      tick();
       appendQcLines(document.getElementById(`file-row-${x.index}`), x.verdict);
     }
   };
@@ -235,6 +247,7 @@ export async function runQc(scan, isCurrent, warningsEl) {
   // (mesma regra do ANALYZER). Corre em Rust; falha silenciosa se der erro.
   const stemPaths = items.filter((x) => x.role === "stems" && x.analysis).map((x) => x.file.path);
   if (stemPaths.length >= 2) {
+    progress.textContent = "Checking audio… summing stems";
     try {
       const sum = await invoke("qc_stems_sum", { paths: stemPaths });
       if (!isCurrent()) return;
@@ -260,6 +273,7 @@ export async function runQc(scan, isCurrent, warningsEl) {
       );
   }
 
+  progress.remove();
   if (cross.length || failed) {
     // Bloco estruturado: um titulo + cada problema na sua propria linha (antes
     // era tudo espremido numa linha so, separado por " · ").
