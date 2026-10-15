@@ -30,6 +30,10 @@ pub struct ScannedFile {
     pub upload_field: Option<String>,
     /// true para os mixes master (Extended/Radio) que geram MP3 na Fase 4
     pub is_master: bool,
+    /// Stem dentro de uma pasta "Ungrouped": os stems individuais que ja estao
+    /// dentro dos stems de grupo. Passam pelo QC por ficheiro, mas nao entram
+    /// na soma (contavam o mesmo som duas vezes e a soma "clipava").
+    pub ungrouped: bool,
 }
 
 #[derive(Serialize)]
@@ -263,8 +267,14 @@ fn is_mac_junk(path: &str) -> bool {
         .any(|c| c.eq_ignore_ascii_case("__MACOSX") || c.starts_with("._"))
 }
 
+/// Pasta (ou zip) com os stems individuais nao agrupados: "Ungrouped",
+/// "Ungrouped Stems". Por palavra, como as outras palavras-chave.
+fn is_ungrouped_name(name_lower: &str) -> bool {
+    has_word(name_lower, |w| w.starts_with("ungroup"))
+}
+
 /// Percorre a pasta recursivamente (profundidade limitada) coletando arquivos.
-fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>) {
+fn walk(dir: &Path, in_stems_dir: bool, in_ungrouped: bool, depth: usize, out: &mut Vec<ScannedFile>) {
     if depth > 5 {
         return;
     }
@@ -284,7 +294,8 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
                 continue;
             }
             let child_in_stems = in_stems_dir || is_stems_name(&name_lower);
-            walk(&path, child_in_stems, depth + 1, out);
+            let child_ungrouped = in_ungrouped || is_ungrouped_name(&name_lower);
+            walk(&path, child_in_stems, child_ungrouped, depth + 1, out);
             continue;
         }
 
@@ -308,6 +319,7 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
                 role: UNDEFINED.role.into(),
                 upload_field: None,
                 is_master: false,
+                ungrouped: false,
             });
             continue;
         };
@@ -319,6 +331,7 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
             classify(&name_lower, &ext, in_stems_dir)
         };
         let md = entry.metadata().ok();
+        let ungrouped = in_ungrouped && c.category == "stems";
 
         out.push(ScannedFile {
             filename: file_name.clone(),
@@ -327,10 +340,11 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
             size: md.as_ref().map(|m| m.len()).unwrap_or(0),
             modified: md.as_ref().map(mtime_ms).unwrap_or(0),
             category: c.category.to_string(),
-            label: c.label.to_string(),
+            label: if ungrouped { "Stem (ungrouped — checked, not summed)".into() } else { c.label.to_string() },
             role: c.role.to_string(),
             upload_field: c.upload_field.map(|s| s.to_string()),
             is_master: c.is_master,
+            ungrouped,
         });
 
         // Stems num .zip: o zip acima continua a ser o ficheiro enviado
@@ -340,7 +354,10 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
         // do zip nao depende disto).
         if ext == "zip" && (is_stems_name(&name_lower) || in_stems_dir) {
             if let Ok(wavs) = extract_wavs_from_zip(&path_s) {
-                for w in wavs {
+                // Zip inteiro "Ungrouped Stems.zip" (ou dentro de Ungrouped/).
+                let zip_ungrouped = in_ungrouped || is_ungrouped_name(&name_lower);
+                for (w, in_ungrouped_dir) in wavs {
+                    let ungrouped = zip_ungrouped || in_ungrouped_dir;
                     let wname = Path::new(&w)
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -353,10 +370,11 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
                         size: wsize,
                         modified: 0, // copia temporaria, nao sobe
                         category: "stems".into(),
-                        label: "Stem (from zip)".into(),
+                        label: if ungrouped { "Stem (from zip, ungrouped — checked, not summed)".into() } else { "Stem (from zip)".into() },
                         role: "skip".into(), // QC-only: nao entra no upload
                         upload_field: None,
                         is_master: false,
+                        ungrouped,
                     });
                 }
             }
@@ -365,9 +383,9 @@ fn walk(dir: &Path, in_stems_dir: bool, depth: usize, out: &mut Vec<ScannedFile>
 }
 
 /// Extrai os WAVs de um .zip de stems para uma pasta temporaria e devolve os
-/// caminhos. So para QC (o zip original e que sobe no upload). Porta do
+/// caminhos (+ se a entrada estava numa pasta "Ungrouped"). So para QC (o zip original e que sobe no upload). Porta do
 /// GPW ANALYZER (extract_wavs_from_zip), com protecao contra nomes com pasta.
-fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
+fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<(String, bool)>, String> {
     let path = Path::new(zip_path);
     let name = path
         .file_stem()
@@ -412,7 +430,11 @@ fn extract_wavs_from_zip(zip_path: &str) -> Result<Vec<String>, String> {
             Err(_) => continue,
         };
         if std::io::copy(&mut entry, &mut f).is_ok() {
-            out.push(target.to_string_lossy().to_string());
+            // a pasta perde-se na extracao (achatada): guarda-se aqui
+            let mut dirs: Vec<&str> = ename.split(['/', '\\']).collect();
+            dirs.pop();
+            let ungrouped = dirs.iter().any(|d| is_ungrouped_name(&d.to_lowercase()));
+            out.push((target.to_string_lossy().to_string(), ungrouped));
         }
     }
     if out.is_empty() {
@@ -434,7 +456,7 @@ pub fn scan(folder: &str) -> Result<ScanResult, String> {
     }
 
     let mut files = Vec::new();
-    walk(dir, false, 0, &mut files);
+    walk(dir, false, false, 0, &mut files);
 
     // Dois WAVs no mesmo slot: o desempate era a ordem do nome ("Track
     // Extended Mix (v2).wav" ganhava ou perdia ao acaso). Ficam os dois por
@@ -734,7 +756,7 @@ mod tests {
         }
         zw.finish().unwrap();
 
-        let wavs = extract_wavs_from_zip(&zip_path.to_string_lossy()).unwrap();
+        let wavs: Vec<String> = extract_wavs_from_zip(&zip_path.to_string_lossy()).unwrap().into_iter().map(|(w, _)| w).collect();
         assert_eq!(wavs.len(), 4, "{:?}", wavs);
         let unique: std::collections::HashSet<_> = wavs.iter().collect();
         assert_eq!(unique.len(), 4, "dois stems no mesmo ficheiro: {:?}", wavs);
@@ -744,6 +766,36 @@ mod tests {
         for b in ["a", "b", "c", "d"] {
             assert!(bodies.iter().any(|x| x == b), "stem {} perdido", b);
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stems_ungrouped_ficam_marcados_em_pasta_e_em_zip() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("gpw_ungrouped_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Stems").join("Ungrouped")).unwrap();
+        fs::write(dir.join("Track - Extended Mix.wav"), b"x").unwrap();
+        fs::write(dir.join("Stems").join("Drums Group.wav"), b"x").unwrap();
+        fs::write(dir.join("Stems").join("Ungrouped").join("Kick.wav"), b"x").unwrap();
+        let zip_path = dir.join("Track Stems.zip");
+        let mut zw = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        for n in ["Stems/Bass Group.wav", "Stems/Ungrouped Stems/Sub.wav"] {
+            zw.start_file(n, opts).unwrap();
+            zw.write_all(b"x").unwrap();
+        }
+        zw.finish().unwrap();
+
+        let r = scan(&dir.to_string_lossy()).unwrap();
+        let flag = |n: &str| r.files.iter().find(|f| f.filename == n).unwrap_or_else(|| panic!("{} em falta", n)).ungrouped;
+        assert!(!flag("Drums Group.wav"));
+        assert!(flag("Kick.wav"));
+        assert!(!flag("Bass Group.wav"));
+        assert!(flag("Sub.wav"));
+        assert!(!flag("Track - Extended Mix.wav"));
+        // "Ungrouped" so marca stems: e continua a ser uma pasta de stems normal.
+        assert_eq!(r.files.iter().find(|f| f.filename == "Kick.wav").unwrap().category, "stems");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -763,6 +815,6 @@ mod tests {
 
         let wavs = extract_wavs_from_zip(&zip_path.to_string_lossy()).unwrap();
         assert_eq!(wavs.len(), 1);
-        assert!(wavs[0].ends_with("Kick.wav") && !wavs[0].contains("._"));
+        assert!(wavs[0].0.ends_with("Kick.wav") && !wavs[0].0.contains("._"));
     }
 }
