@@ -968,6 +968,22 @@ body {
   font-size: 13px;
   color: var(--gpw-yellow);
 }
+/* Spinner antes do texto enquanto algo corre (analise, QC) */
+.is-busy::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 8px;
+  vertical-align: -1px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
 .results__note {
   margin: 12px 0 0;
   font-size: 12.5px;
