@@ -25,9 +25,12 @@ if (-not $Notes) { $Notes = "GPW Uploader $version" }
 # Verificacoes ANTES do build (que demora): republicar uma tag ja instalada
 # pelos produtores, ou publicar de uma arvore suja/diferente do main, deixa
 # instaladores que nao correspondem a nenhum commit.
-gh release view $tag --repo fdavid90faria-glitch/gpwapp *> $null
-if ($LASTEXITCODE -eq 0) { throw "$tag ja esta publicada: suba a versao em tauri.conf.json (e Cargo.toml). Nunca republique a mesma tag." }
-$global:LASTEXITCODE = 0
+# "gh release list" e nao "gh release view": o view escreve "release not
+# found" no stderr, e com ErrorActionPreference=Stop o PowerShell 5.1 trata
+# isso como erro fatal — exatamente no caso normal (tag ainda nao publicada).
+$tags = gh release list --repo fdavid90faria-glitch/gpwapp --limit 1000 --json tagName --jq '.[].tagName'
+if ($LASTEXITCODE -ne 0) { throw "gh release list falhou (gh autenticado?)." }
+if ($tags -contains $tag) { throw "$tag ja esta publicada: suba a versao em tauri.conf.json (e Cargo.toml). Nunca republique a mesma tag." }
 if (git status --porcelain --untracked-files=no) { throw "Arvore com alteracoes por commitar: faca commit (ou stash) antes de publicar." }
 git fetch -q origin main
 if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) { throw "HEAD nao e o origin/main: publique a partir do main atualizado." }
