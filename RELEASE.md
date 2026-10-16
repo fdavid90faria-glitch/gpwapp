@@ -5,7 +5,7 @@ guia é o passo a passo de **cada nova versão**. O build é **local**, na sua m
 
 ## Pré-requisitos (uma vez só)
 
-1. **Repositório no GitHub** para o app: `fdavid90faria-glitch/gpwapp` (público).
+1. **Repositório no GitHub** para o app: `fdavid90faria-glitch/gpwapp` (privado, código) + `fdavid90faria-glitch/gpwapp-releases` (público, só releases).
    - Se mudar o nome/owner, atualize em **dois** lugares:
      - `src-tauri/tauri.conf.json` → `plugins.updater.endpoints`
      - `scripts/make-latest-json.mjs` → `REPO`
@@ -47,7 +47,7 @@ Cria `src-tauri/target/release/bundle/latest.json`.
   2. o `latest.json`
   3. uma **cópia** do instalador renomeada para `GPW-Uploader-setup.exe` (nome fixo,
      sem versão) — é o que o link de download do site aponta:
-     `https://github.com/fdavid90faria-glitch/gpwapp/releases/latest/download/GPW-Uploader-setup.exe`
+     `https://github.com/fdavid90faria-glitch/gpwapp-releases/releases/latest/download/GPW-Uploader-setup.exe`
 - Publique (não marque como *pre-release*).
 
 > O GitHub troca espaços por pontos no nome do arquivo baixável

@@ -15,7 +15,7 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // Repositório do app no GitHub (ajuste se mudar).
-const REPO = "fdavid90faria-glitch/gpwapp";
+const REPO = "fdavid90faria-glitch/gpwapp-releases";
 
 const conf = JSON.parse(readFileSync(join(root, "src-tauri/tauri.conf.json"), "utf8"));
 const version = conf.version;

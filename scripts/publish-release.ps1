@@ -28,7 +28,7 @@ if (-not $Notes) { $Notes = "GPW Uploader $version" }
 # "gh release list" e nao "gh release view": o view escreve "release not
 # found" no stderr, e com ErrorActionPreference=Stop o PowerShell 5.1 trata
 # isso como erro fatal — exatamente no caso normal (tag ainda nao publicada).
-$tags = gh release list --repo fdavid90faria-glitch/gpwapp --limit 1000 --json tagName --jq '.[].tagName'
+$tags = gh release list --repo fdavid90faria-glitch/gpwapp-releases --limit 1000 --json tagName --jq '.[].tagName'
 if ($LASTEXITCODE -ne 0) { throw "gh release list falhou (gh autenticado?)." }
 if ($tags -contains $tag) { throw "$tag ja esta publicada: suba a versao em tauri.conf.json (e Cargo.toml). Nunca republique a mesma tag." }
 if (git status --porcelain --untracked-files=no) { throw "Arvore com alteracoes por commitar: faca commit (ou stash) antes de publicar." }
@@ -61,8 +61,8 @@ Copy-Item $exe.FullName $fixed -Force
 
 Write-Host "==> Publicando release $tag no GitHub..."
 gh release create $tag $exe.FullName $latest $fixed `
-  --repo fdavid90faria-glitch/gpwapp --title "GPW Uploader $version" --notes $Notes --latest `
-  --target (git rev-parse HEAD)
+  --repo fdavid90faria-glitch/gpwapp-releases --title "GPW Uploader $version" --notes $Notes --latest
+# ponytail: sem --target; o commit vive no repo privado, a tag nasce no main do gpwapp-releases
 if ($LASTEXITCODE -ne 0) { throw "gh release create falhou. Se a tag $tag ja existir, suba a versao; nunca republique a mesma tag." }
 
 Write-Host "OK: release $tag publicada. Aba Tools e auto-updater ja apontam para ela."
