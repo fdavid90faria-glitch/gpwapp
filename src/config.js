@@ -5,8 +5,9 @@
 // uma vez; a tela de revisao ja vem com tudo preenchido.
 
 export const SUPABASE_URL = "https://dhtylvgufuqsjuoxfxst.supabase.co";
-export const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRodHlsdmd1ZnVxc2p1b3hmeHN0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1NTEwMzYsImV4cCI6MjA5NzEyNzAzNn0.ypGbYS5S-orm4OF61uUPQ9kGO28eYyYZx3nJ53BWF_o";
+// Chave PUBLICA (publishable). A anon JWT antiga foi desligada em 2026-10-23
+// (rotacao depois do vazamento no Railway).
+export const SUPABASE_ANON_KEY = "sb_publishable_7J-btqnPZNeEVRadV-t5_w_XwQIHjxn";
 
 // Lista de generos do site (public/upload.html, select #selGenre).
 export const GENRES = [
